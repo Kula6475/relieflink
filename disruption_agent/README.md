@@ -1,52 +1,73 @@
 # Disruption Agent (weather + FEMA -> demand forecasts)
 
-**Owner: Pranav**
+**Owner: Pranav** | Status: **core tasks complete**
 
 Pulls live weather alerts from api.weather.gov and disaster declarations from OpenFEMA,
-turns them into a demand-spike multiplier per site, and posts predicted demand per
-(site, category) to the ledger for the next 48 hours.
+turns them into a per-category demand multiplier per site, and posts predicted demand
+per (site, category) to the ledger for the next 48 hours.
 
 ## Run it
 
 ```bash
 # from the repo root, with the ledger running and seeded
 
-# Demo mode: fabricates a severe storm over every site (works on a sunny day)
+# Demo mode: fabricates a severe storm over every site + a FEMA declaration
+# for Santa Cruz County (works on a sunny day)
 python -m disruption_agent.agent --synthetic
 
-# Live mode: real NWS alerts at each site's lat/lon, no API key needed
+# Live mode: real NWS alerts at each site's lat/lon + real OpenFEMA data, no key needed
 python -m disruption_agent.agent
+
+# Inspect the raw alert fields NWS returns
+python -m disruption_agent.agent --verbose
+
+# Keep forecasts fresh (refresh every hour)
+python -m disruption_agent.agent --loop 3600
 ```
 
 Then `curl http://localhost:8000/forecasts` or check the dashboard's forecast tab.
 
-## Files you own
+## How a forecast is computed
 
-- `agent.py` - fetchers, the multiplier logic, and forecast posting.
+For each (site, category):
 
-## Your tasks
+1. **Baseline** comes from a fitted demand model (`demand_model.py`): 90 days of
+   deterministic synthetic history per site/category, fitted with a linear trend plus
+   weekday profile, projected over the horizon. Swap `generate_history()` for real CSV
+   logs and nothing else changes.
+2. **Spike** from the worst active NWS alert: Extreme 3.0, Severe 2.0, Moderate 1.5,
+   Minor 1.2.
+3. **Coverage**: the fraction of the next 48h the alert is actually active, computed
+   from its `onset`/`ends` timestamps. A storm that ends in 6 hours barely moves the
+   forecast; one covering the whole window moves it fully.
+4. **Category sensitivity**: shelf-stable food spikes hardest ahead of a disruption
+   (canned 1.0, dry 0.9, produce 0.5, dairy 0.4).
+5. **FEMA bump**: if the site's county has a declaration in the last 60 days
+   (matched via OpenFEMA `designatedArea`), the multiplier gets a further x1.5.
+6. Final multiplier is capped at 4.0. `predicted_demand = ceil(baseline * multiplier)`,
+   and every forecast row carries a human-readable `reason`.
 
-- [ ] Run `--synthetic` end to end and confirm forecasts land in the ledger.
-- [ ] Run live mode and inspect what api.weather.gov actually returns for each site
-      (severity, event, onset/expires). Log or print the raw alerts once.
-- [ ] **Fold FEMA into the multiplier**: `fetch_fema_declarations()` already works but
-      is unused. Match declarations to sites by county (`designatedArea` field) and
-      bump the multiplier for sites in a declared-disaster county.
-- [ ] **Per-category multipliers**: a storm spikes canned/dry goods harder than dairy
-      (people stock shelf-stable food). Replace the single multiplier with a
-      per-category one.
-- [ ] **Time-aware demand**: use alert `onset`/`expires` to scale the horizon instead
-      of the flat 48h.
-- [ ] Stretch: replace `BASELINE_DAILY_DEMAND` with a per-site synthetic historical
-      curve (e.g. a CSV of 90 days of daily demand) and fit a simple regression or
-      Prophet model so "predicted demand" is a real forecast, not baseline x multiplier.
-- [ ] Stretch: schedule it (cron or a `--loop` flag) so forecasts refresh hourly.
+## Files
 
-## Definition of done
+- `agent.py` - fetchers, scoring (coverage, severity, FEMA), posting, CLI.
+- `demand_model.py` - synthetic history generation + trend/weekday regression.
+- `tests/test_disruption.py` - unit tests for all the scoring logic (no network).
 
-Running the agent against live APIs produces sensible, explainable forecasts for all
-4 sites (each forecast row carries a human-readable `reason`), and a synthetic run
-visibly raises predicted demand at affected sites on the dashboard.
+## Task list
+
+- [x] Synthetic and live runs end to end
+- [x] Inspect raw NWS alerts (`--verbose`)
+- [x] Fold FEMA declarations into the multiplier (county match on `designatedArea`)
+- [x] Per-category multipliers (shelf-stable spikes hardest)
+- [x] Time-aware demand from alert `onset`/`ends` (coverage fraction)
+- [x] Regression baseline over 90-day history instead of a flat constant
+- [x] Refresh loop (`--loop N`)
+
+Ideas if there is time left:
+- [ ] Replace synthetic history with real distribution CSVs per site
+- [ ] Prophet (or statsmodels) instead of the hand-rolled trend + weekday fit
+- [ ] Match alerts by NWS zone/polygon instead of a point lookup
+- [ ] Incident-type-specific sensitivities (fire vs flood vs storm)
 
 ## API notes
 
