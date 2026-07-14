@@ -1,0 +1,14 @@
+# One install for every section: pip install -r requirements.txt
+fastapi
+uvicorn[standard]
+sqlmodel
+requests
+python-dotenv
+anthropic
+streamlit
+pandas
+plotly
+ortools
+pytest
+httpx
+ruff
