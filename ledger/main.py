@@ -142,19 +142,62 @@ def list_recommendations(session: Session = Depends(get_session)) -> list[Recomm
     return list(session.exec(select(Recommendation)).all())
 
 
-# ---------------------------------------------------------------- your tasks
-#
-# TODO(Vivaan/Akul) - build these next. The exact request/response shapes are
-# specified in docs/api-contract.md:
-#
-#   GET /gaps
-#       For each (site, category): gap = latest predicted_demand - latest count.
-#       Positive gap = shortage, negative gap = surplus. This endpoint is what
-#       the Phase 2 reallocation agent consumes, so it unblocks the whole team.
-#
-#   POST /recommendations
-#       Accept a Recommendation (validate both site ids and the category).
-#
-#   POST /recommendations/{rec_id}/approve
-#       Flip status "proposed" -> "approved". The dashboard's approve button
-#       calls this.
+@app.get("/gaps")
+def compute_gaps(session: Session = Depends(get_session)) -> list[dict]:
+    """For each (site, category) with both a snapshot and a forecast,
+    gap = predicted_demand - current count. Positive = shortage, negative = surplus.
+    """
+    inventory = latest_inventory(session=session)
+    forecasts = latest_forecasts(session=session)
+
+    current_by_key = {(s.site_id, s.category): s.count for s in inventory}
+    forecast_by_key = {(f.site_id, f.category): f.predicted_demand for f in forecasts}
+
+    gaps = []
+    for key, predicted_demand in forecast_by_key.items():
+        site_id, category = key
+        if key not in current_by_key:
+            continue
+        current = current_by_key[key]
+        gaps.append({
+            "site_id": site_id,
+            "category": category,
+            "current": current,
+            "predicted_demand": predicted_demand,
+            "gap": predicted_demand - current,
+        })
+    return gaps
+
+
+@app.post("/recommendations", status_code=201)
+def create_recommendation(
+    rec: Recommendation, session: Session = Depends(get_session)
+) -> Recommendation:
+    """Reallocation agent posts a proposed transfer here."""
+    if rec.category not in CATEGORIES:
+        raise HTTPException(422, f"category must be one of {CATEGORIES}")
+    if session.get(Site, rec.from_site_id) is None:
+        raise HTTPException(404, f"site {rec.from_site_id} not found")
+    if session.get(Site, rec.to_site_id) is None:
+        raise HTTPException(404, f"site {rec.to_site_id} not found")
+    rec.id = None
+    rec.status = "proposed"
+    session.add(rec)
+    session.commit()
+    session.refresh(rec)
+    return rec
+
+
+@app.post("/recommendations/{rec_id}/approve")
+def approve_recommendation(
+    rec_id: int, session: Session = Depends(get_session)
+) -> Recommendation:
+    """Dashboard's approve button calls this. No body needed."""
+    rec = session.get(Recommendation, rec_id)
+    if rec is None:
+        raise HTTPException(404, f"recommendation {rec_id} not found")
+    rec.status = "approved"
+    session.add(rec)
+    session.commit()
+    session.refresh(rec)
+    return rec
