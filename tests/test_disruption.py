@@ -6,10 +6,13 @@ Run with: pytest
 from datetime import date, datetime, timedelta, timezone
 
 from disruption_agent.agent import (
+    DISRUPTION_GRAPH,
     MAX_MULTIPLIER,
     active_fema_counties,
     alert_coverage,
     category_multiplier,
+    claude_reason_node,
+    forecast_node,
     worst_alert,
 )
 from disruption_agent.demand_model import baseline_demand, generate_history
@@ -114,3 +117,57 @@ def test_baseline_demand_is_positive_and_scales_with_horizon():
     one_day = baseline_demand(2, "canned_goods", 24, start=start)
     assert one_day > 0
     assert two_days > one_day
+
+
+# ---------------------------------------------------------------- LangGraph nodes
+
+
+def test_disruption_graph_has_expected_nodes():
+    nodes = DISRUPTION_GRAPH.get_graph().nodes
+    assert {"fetch", "score", "claude_reason", "forecast", "post"}.issubset(nodes)
+
+
+def test_synthetic_reason_node_never_needs_a_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-be-used")
+    result = claude_reason_node(
+        {
+            "synthetic": True,
+            "scored_sites": [
+                {
+                    "site": {"id": 7, "name": "Test", "county": "Alameda"},
+                    "alerts": [],
+                    "coverage": 0.0,
+                    "fema_active": False,
+                    "fallback_reason": "no active alerts",
+                }
+            ],
+        }
+    )
+    assert result == {"reasons": {7: "no active alerts"}}
+
+
+def test_forecast_node_uses_reason_and_contract_shape():
+    result = forecast_node(
+        {
+            "synthetic": True,
+            "reasons": {7: "Synthetic storm summary"},
+            "scored_sites": [
+                {
+                    "site": {"id": 7},
+                    "spike": 2.0,
+                    "coverage": 0.5,
+                    "fema_active": False,
+                }
+            ],
+        }
+    )
+    forecasts = result["forecasts"]
+    assert len(forecasts) == 4
+    assert {row["category"] for row in forecasts} == {
+        "canned_goods",
+        "produce",
+        "dairy",
+        "dry_goods",
+    }
+    assert all(row["reason"] == "Synthetic storm summary" for row in forecasts)
+    assert all(row["source"] == "synthetic" for row in forecasts)

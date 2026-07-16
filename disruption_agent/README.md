@@ -6,6 +6,10 @@ Pulls live weather alerts from api.weather.gov and disaster declarations from Op
 turns them into a per-category demand multiplier per site, and posts predicted demand
 per (site, category) to the ledger for the next 48 hours.
 
+The runtime is a LangGraph pipeline: `fetch -> score -> claude_reason -> forecast -> post`.
+Claude condenses the alert evidence into each forecast's `reason`; when no Anthropic key
+is configured, and always in `--synthetic`, the graph uses the deterministic reason.
+
 ## Run it
 
 ```bash

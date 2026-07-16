@@ -11,6 +11,8 @@ python-multipart
 pytest
 httpx
 ruff
+langgraph
+langchain-anthropic
 
 # Optional, only for the Python edge detector (the browser one at /camera needs nothing):
 #   pip install ultralytics

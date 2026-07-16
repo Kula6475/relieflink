@@ -2,28 +2,20 @@
 
 **Owners: everyone** | Status: **working end to end**
 
-Given camera-fed inventory and disaster-driven forecasts, proposes the minimum-cost set
-of transfers between sites and posts them as recommendations for one-click approval on
-the dashboard's Transfers tab.
+A LangGraph pipeline fetches ledger inputs, solves one cross-category OR-Tools program,
+posts recommendations, and explains the plan in plain language with Claude. The solver
+limits each site's total outbound units across categories to its truck capacity.
 
 ## Run it
 
 ```bash
-# needs gaps to exist: inventory (camera/fake) + forecasts (disruption agent) first
-python -m reallocation_agent.agent            # solve and post recommendations
-python -m reallocation_agent.agent --dry-run  # solve and print only
+python -m reallocation_agent.agent --dry-run
+python -m reallocation_agent.agent
+python -m reallocation_agent.agent --why "Why move canned goods from site 1?"
 ```
 
-## How it works
-
-1. Pulls `/gaps` (surplus and shortage per site + category), `/routes` (miles), and
-   `/capacity` (trucks x max load per site) from the ledger.
-2. Solves one linear program across all categories (OR-Tools GLOP):
-   minimize miles driven minus a large per-unit delivery reward, subject to per-category
-   surplus/shortage limits and each site's **total** outbound truck capacity.
-3. POSTs each chosen transfer to `/recommendations` with a plain-language reason.
-4. If `ANTHROPIC_API_KEY` is set, Claude adds a 3-sentence justification of the overall
-   plan for the ops director (skipped silently otherwise).
+The graph is `fetch -> solve -> post -> claude`. `--dry-run` never posts or calls Claude;
+without an API key, normal runs post recommendations and use a deterministic explanation.
 
 ## Remaining ideas
 
