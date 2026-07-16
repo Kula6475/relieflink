@@ -1,8 +1,9 @@
 # ReliefLink - context for AI assistants
 
-Camera-fed food bank inventory network with disaster-aware forecasting and reallocation.
-**One FastAPI server runs everything**: the JSON API, the React CRM dashboard, the edge
-camera page, and the YOLO model file.
+Disaster-aware food-bank inventory network with human-governed multi-organization
+coordination. The primary hosted application is now the Next.js/Neon project under
+`vision_agent/web`. The original FastAPI/SQLite application remains a working prototype
+and supplies stateless OR-Tools and Claude-advisor endpoints during migration.
 
 ## Layout and ownership
 
@@ -11,6 +12,8 @@ camera page, and the YOLO model file.
 | `ledger/` | FastAPI + SQLite: API, queries, spreadsheet bridge, static serving | Vivaan + Akul |
 | `web/` | React CRM dashboard (CDN React + Babel, NO build step) + edge camera page | Vivaan + Akul (dashboard), Nehal (camera) |
 | `vision_agent/` | Python edge YOLO (`edge.py`), ONNX export helper, Claude/photo fallback | Nehal |
+| `vision_agent/web/` | Next.js + Neon hosted app, immutable ledger, auth, ATLAS dashboard | shared |
+| `atlas_optimizer/` | Stateless OR-Tools solve and Claude evidence explanation | shared |
 | `disruption_agent/` | weather.gov + OpenFEMA -> demand forecasts | Pranav |
 | `reallocation_agent/` | OR-Tools transfer optimizer + optional Claude explainer | everyone |
 | `models/yolov8n.onnx` | Committed YOLO weights the browser camera page loads | Nehal |
@@ -30,6 +33,15 @@ ruff check . && pytest -q                 # what CI runs, keep green
 ```
 
 ## Hard rules
+
+- **Hosted source of truth**: production ATLAS state lives only in Neon Postgres. Do not
+  make the hosted app depend on the prototype SQLite database.
+- **Human commitments**: every affected organization approves its own commitment. No
+  agent can approve, reserve, dispatch, or receive for a human.
+- **Hosted vision**: use still-image YOLO for visible package counting and a vision LLM
+  for label/category interpretation. Always require operator and site-reviewer checks.
+- The legacy UI and edge-camera rules below apply only to root `web/` and the Python
+  prototype; they do not prohibit the separately built Next.js application.
 
 - **Dashboard style**: Salesforce-Lightning-inspired, and **no rounded corners** ever
   (`* { border-radius: 0 !important }` in `web/styles.css` is intentional).

@@ -6,6 +6,11 @@ other. Change it only after telling the team (it breaks everyone downstream).
 Base URL: `http://localhost:8000` (override with `LEDGER_URL` in `.env`).
 Interactive docs with try-it-out: `http://localhost:8000/docs`.
 
+The hosted ATLAS application is a separate Next.js service under `vision_agent/web`.
+Its base URL is `http://localhost:3000` in development and it uses Neon Postgres as
+its source of truth. The legacy endpoints below remain unchanged for Python-prototype
+compatibility.
+
 **Categories** (exact strings, everywhere): `canned_goods`, `produce`, `dairy`, `dry_goods`.
 
 ## Implemented endpoints
@@ -75,6 +80,60 @@ Both sites and the category are validated. Stored with `status: "proposed"`.
 ### POST /recommendations/{id}/approve
 No body. Sets `status` to `"approved"`, returns the updated recommendation.
 404 if the id does not exist.
+
+### POST /optimizer/atlas  (hosted ATLAS -> stateless Python OR-Tools)
+
+This endpoint performs no ledger reads or writes. ATLAS sends already-authorized,
+validated supply and logistics data; the service returns a deterministic minimum-cost
+allocation.
+
+```json
+{
+  "requested_quantity": 150,
+  "sources": [
+    {"source_id": "site_oakland", "source_type": "site",
+     "organization_id": "org_oakland", "available_quantity": 100,
+     "capacity_quantity": 100, "distance_miles": 28,
+     "earliest_pickup": "2026-07-17T15:00:00Z", "refrigerated": false}
+  ]
+}
+```
+
+Response:
+
+```json
+{"allocations": [{"source_id": "site_oakland", "quantity": 100,
+  "estimated_cost": 2800}], "unfilled_quantity": 50}
+```
+
+### POST /atlas/advisor
+
+Accepts validated proposal evidence and an optional operations-director question. The
+Claude node uses `shared.config.CLAUDE_MODEL`; without `ANTHROPIC_API_KEY` it returns a
+deterministic explanation. It may explain but never calculates quantities, determines
+permissions, or changes state.
+
+## Hosted Next.js / Neon endpoints
+
+All writes use JWT sessions and organization-scoped authorization in persistent mode.
+The synthetic demo routes are deliberately key-free and do not create real commitments.
+
+| Method and path | Purpose |
+|---|---|
+| `POST /api/auth/login` | Create a signed, HTTP-only session from email/password |
+| `POST /api/auth/logout` | Clear the session |
+| `GET /api/auth/me` | Return the authenticated user |
+| `GET /api/atlas/state` | Organization-scoped ATLAS situation, proposal, messages, approvals, and audit timeline |
+| `POST /api/atlas/triggers` | Persist an authorized weather/FEMA/shortage/inventory/vendor/proposal trigger and start an orchestrator run |
+| `POST /api/atlas/demo` | Reset the non-persistent synthetic scenario |
+| `POST /api/atlas/approvals/{approvalId}` | Record `approved` or `rejected`; only the required organization's human role may decide |
+| `POST /api/vision/analyze` | Run still-image package detection and product classification; never changes inventory |
+
+`POST /api/vision/analyze` accepts multipart form fields `image` and optional
+`synthetic=true`. It returns image dimensions, YOLO model/version, bounding boxes,
+per-object confidence, visible-object count, classification source, and uncertainty.
+Submitting the later operator-confirmation step creates a **pending** immutable inventory
+transaction; only a separate site reviewer may approve it.
 
 ## Spreadsheet bridge
 

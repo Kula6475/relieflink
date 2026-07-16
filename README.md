@@ -1,5 +1,21 @@
 # ReliefLink
 
+> **ATLAS hosted MVP:** A new Next.js + Neon application now lives in
+> [`vision_agent/web`](vision_agent/web). It adds organization-scoped auth, immutable
+> inventory transactions, structured food-bank/vendor/logistics negotiation, deterministic
+> bullwhip controls, OR-Tools allocation, multi-party human approvals, reservations, and
+> an auditable operations dashboard. The FastAPI/SQLite app described below remains the
+> working prototype and compatibility service.
+
+Start the key-free ATLAS demo:
+
+```bash
+cd vision_agent/web
+npm install
+cp .env.example .env.local
+npm run dev
+```
+
 Camera-fed inventory network for food banks, with disaster-aware demand forecasting and
 smart reallocation between sites. **One server runs everything.**
 
