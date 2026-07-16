@@ -56,8 +56,6 @@ Symmetric distances, stored once per pair:
 ### GET /recommendations
 List of proposed/approved transfers (empty until Phase 2).
 
-## To build (Vivaan + Akul, specs)
-
 ### GET /gaps
 For each (site, category) that has both an inventory count and a forecast:
 ```json
@@ -65,15 +63,46 @@ For each (site, category) that has both an inventory count and a forecast:
   "predicted_demand": 480, "gap": 420}]
 ```
 `gap = predicted_demand - current`. Positive = shortage, negative = surplus.
-Include rows for all sites/categories that have data; skip pairs with no forecast.
+Pairs with no forecast are skipped.
 
 ### POST /recommendations  (reallocation agent -> ledger)
 ```json
 {"from_site_id": 1, "to_site_id": 3, "category": "canned_goods",
  "quantity": 150, "reason": "Site 3 shortfall of 420 under storm forecast"}
 ```
-Validate both sites and the category. Stored with `status: "proposed"`.
+Both sites and the category are validated. Stored with `status: "proposed"`.
 
 ### POST /recommendations/{id}/approve
-No body. Sets `status` to `"approved"`. 404 if the id does not exist.
-Returns the updated recommendation.
+No body. Sets `status` to `"approved"`, returns the updated recommendation.
+404 if the id does not exist.
+
+## Spreadsheet bridge
+
+### POST /spreadsheets/import
+Multipart upload, field name `file`, accepts `.xlsx` or `.csv`. Flexible headers
+(case-insensitive): `site`/`location`/`pantry`, `category`/`type`,
+`count`/`qty`/`quantity`, optional `county`, `lat`, `lon`. Unknown sites are created.
+Response:
+```json
+{"imported_rows": 8, "created_sites": ["Fremont Family Pantry"],
+ "skipped": [{"row": 4, "reason": "need site, a known category, and a count"}],
+ "export_url": "/spreadsheets/export"}
+```
+
+### GET /spreadsheets/export
+Downloads `relieflink-live.xlsx`, regenerated from the live ledger on every request
+(sheets: README, Inventory, Forecasts, Gaps, Upload). Same URL, always current: this is
+the "connected spreadsheet" partners keep.
+
+### GET /spreadsheets/template
+A blank starter sheet with the right headers and example rows.
+
+## Frontend + static (same server)
+
+| Path | Serves |
+|---|---|
+| `/` | React CRM dashboard (`web/index.html`) |
+| `/camera` | in-browser edge YOLO page (`web/camera.html`) |
+| `/static/...` | `web/` assets |
+| `/models/yolov8n.onnx` | YOLO weights for the camera page |
+| `/api` | machine-readable service info (name, docs URL, categories) |

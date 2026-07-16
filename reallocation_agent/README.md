@@ -1,38 +1,24 @@
-# Reallocation Agent (Phase 2)
+# Reallocation Agent
 
-**Owners: everyone, built together after Phase 1 lands.**
+**Owners: everyone** | Status: **working end to end**
 
-The payoff of the whole system: a LangGraph pipeline fetches ledger inputs, runs the
-OR-Tools optimizer, posts transfers, and explains the plan in plain language via Claude.
-Without an API key (and always under `--dry-run`) it uses a deterministic explanation.
+A LangGraph pipeline fetches ledger inputs, solves one cross-category OR-Tools program,
+posts recommendations, and explains the plan in plain language with Claude. The solver
+limits each site's total outbound units across categories to its truck capacity.
 
-## Prerequisites (from Phase 1)
-
-- Ledger `GET /gaps` endpoint (Vivaan + Akul)
-- Real or fake inventory flowing from the vision agent (Nehal)
-- Forecasts flowing from the disruption agent (Pranav)
-
-## Run the connected agent
-
-With the seeded ledger running, first populate inventory and forecasts, then build and
-post transfer recommendations:
+## Run it
 
 ```bash
-python -m vision_agent.agent --site-id 1 --fake
-python -m disruption_agent.agent --synthetic
-python -m reallocation_agent.agent --dry-run  # inspect without posting
-python -m reallocation_agent.agent            # post to /recommendations
+python -m reallocation_agent.agent --dry-run
+python -m reallocation_agent.agent
 python -m reallocation_agent.agent --why "Why move canned goods from site 1?"
 ```
 
-The standalone toy example is still available with `--demo`.
+The graph is `fetch -> solve -> post -> claude`. `--dry-run` never posts or calls Claude;
+without an API key, normal runs post recommendations and use a deterministic explanation.
 
-## Phase 2 status
+## Remaining ideas
 
-1. [x] Pull `/gaps`, `/routes`, `/capacity` from the ledger.
-2. [x] Run `solve_transfers()` per category with truck-capacity constraints.
-3. [x] POST results to `/recommendations`.
-4. [x] Claude explanation and follow-up `--why` Q&A, with a no-key fallback.
-5. [ ] Dashboard approve button dispatches it (Vivaan + Akul).
-
-The numbered TODO list in `agent.py` mirrors this.
+- [ ] Multi-hop routing (via a depot) instead of direct lanes only
+- [ ] Respect `drive_minutes` with a delivery deadline per shortage
+- [ ] Post Claude's plan summary somewhere visible on the dashboard

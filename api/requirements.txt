@@ -1,0 +1,8 @@
+# Server-side deps only (what the ledger needs on Vercel). Agents (ortools,
+# anthropic) run locally and are NOT deployed; full dev set is the root
+# requirements.txt.
+fastapi
+sqlmodel
+python-dotenv
+openpyxl
+python-multipart

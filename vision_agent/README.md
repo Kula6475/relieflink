@@ -1,59 +1,48 @@
-# Vision Agent (camera -> counts)
+# Vision (edge YOLO -> ledger)
 
-**Owner: Nehal**
+**Owner: Nehal** | Status: **edge pipeline live**
 
-A camera (or phone photo) pointed at shelves, a Claude vision call that counts items per
-category, and a POST to the ledger. No model training, no YOLO, just a well-crafted
-counting prompt with a forced JSON schema so the output is always parseable.
+Shelf counting happens **on the edge**: a YOLOv8n model runs locally on whatever device
+is pointing at the shelf. No frames leave the device, only category counts are posted to
+the ledger, and only when a stable count actually changes (someone took a can off the
+shelf).
 
-## Run it
+## Two ways to run it
+
+### 1. Browser (any device with a camera, nothing to install)
+
+Open **http://localhost:8000/camera**, pick a site, hit Start. YOLOv8n runs in the tab
+via onnxruntime-web using the committed `models/yolov8n.onnx`. Works on laptops and
+phones (phones need a secure context: localhost, an https tunnel, or `--ssl-keyfile`).
+
+### 2. Python (headless devices: Raspberry Pi, Jetson, kiosk box)
 
 ```bash
-# from the repo root, with the ledger running (uvicorn ledger.main:app --reload)
-
-# 1. Fake mode: works instantly, no camera, no API key. Use this to test the pipeline.
-python -m vision_agent.agent --site-id 1 --fake
-
-# 2. Real mode: put ANTHROPIC_API_KEY in .env, then point it at any shelf photo.
-python -m vision_agent.agent --site-id 1 --image my_shelf.jpg
-
-# 3. Webcam mode (pip install opencv-python first):
-python -m vision_agent.agent --site-id 1 --camera 0 --loop 45
+pip install ultralytics       # optional dep, not in requirements.txt
+python -m vision_agent.edge --site-id 1 --camera 0
 ```
 
-After any of these, `curl http://localhost:8000/inventory` (or the dashboard) shows
-your counts.
+Same logic: detect every ~1.2s, post to the ledger only when stable counts change.
 
-## Files you own
+## Fallbacks
 
-- `agent.py` - everything: the prompt, the Claude call, the capture loop, the posting.
+- `python -m vision_agent.agent --site-id 1 --fake` posts random counts (demo insurance).
+- `python -m vision_agent.agent --site-id 1 --image shelf.jpg` counts one photo with
+  Claude vision (needs `ANTHROPIC_API_KEY`), useful to sanity-check YOLO's counts.
 
-## Your tasks
+## How the auto-update works
 
-- [ ] Get `--fake` working end to end (ledger running, counts appear on the dashboard).
-- [ ] Get an `ANTHROPIC_API_KEY` (ask Pranav) into your `.env`, take a photo of any
-      pantry/shelf with your phone, and run `--image`. Sanity-check the counts.
-- [ ] Tune `COUNTING_PROMPT`: try 5 different shelf photos, note where counts are off,
-      and iterate on the prompt wording until category-level counts look reasonable.
-- [ ] Test `--camera --loop` with your laptop webcam pointed at a shelf.
-- [ ] **Motion trigger** (the interesting part): in loop mode, only call Claude when the
-      frame actually changed. Simplest approach: compare consecutive frames with OpenCV
-      (`cv2.absdiff` + mean threshold) and skip the API call when nothing moved. This
-      saves API cost and makes the demo story better.
-- [ ] Stretch: crop/downscale frames before sending (smaller + faster + cheaper), and
-      log `notes` from Claude somewhere visible.
+1. A frame is detected every ~1.2 seconds.
+2. Detections map from COCO classes to our categories (demo stand-ins):
+   bottle/cup -> canned_goods, banana/apple/orange/broccoli/carrot -> produce,
+   bowl/wine glass -> dairy, book -> dry_goods.
+3. Counts must be identical for 2 consecutive frames (kills flicker), and only a change
+   vs the last posted state triggers a POST. Take a can off the shelf: one clean ledger
+   update a couple of seconds later, visible on the dashboard within 5s.
 
-## Definition of done
+## Remaining ideas
 
-A laptop webcam pointed at a shelf posts believable category counts to the ledger every
-45-60 seconds, skipping Claude calls when nothing moved, and the dashboard reflects a
-change within a minute of you adding/removing items from the shelf.
-
-## Tips
-
-- The JSON schema (`COUNT_SCHEMA`) guarantees Claude's reply parses. If counts are
-  *wrong*, fix the prompt, not the parsing.
-- Demo insurance: `--fake` always works. If wifi or the API dies during the demo,
-  fall back to it.
-- Ask Claude/Cursor: "read vision_agent/agent.py and add a motion-detection gate to
-  the loop using cv2.absdiff".
+- [ ] Fine-tune YOLOv8n on real shelf photos (cans, cartons, boxes) and re-export with
+      `python -m vision_agent.export_model`, this replaces the COCO stand-in mapping.
+- [ ] Per-shelf zones: only count detections inside a user-drawn region.
+- [ ] WebGPU execution provider in `camera.js` for faster in-browser inference.

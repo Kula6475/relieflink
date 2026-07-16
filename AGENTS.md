@@ -1,11 +1,13 @@
 # ReliefLink - agent/assistant instructions
 
-Read [CLAUDE.md](CLAUDE.md) for the full project context (layout, ownership, commands,
-conventions). Quick version:
+Read [CLAUDE.md](CLAUDE.md) for full context (layout, ownership, commands, hard rules).
+Quick version:
 
-- Python only. Install: `pip install -r requirements.txt`. Run modules from the repo
-  root with `python -m package.module`.
-- Sections communicate only through the ledger HTTP API. The contract is
-  [docs/api-contract.md](docs/api-contract.md), read it before touching endpoints.
+- One server runs everything: `uvicorn ledger.main:app --reload` serves the dashboard
+  (`/`), the edge camera (`/camera`), and the API (`/docs`).
+- Frontend is CDN React + Babel, **no build step**, Salesforce-style, **no rounded
+  corners** (enforced in `web/styles.css`).
+- Vision is edge YOLO (browser ONNX or Python ultralytics); camera frames never leave
+  the device.
+- The API contract is [docs/api-contract.md](docs/api-contract.md).
 - Keep `ruff check .` and `pytest -q` green (CI enforces both).
-- Each folder's README.md contains that owner's task checklist. Start there.

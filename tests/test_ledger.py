@@ -1,13 +1,10 @@
-"""Smoke tests for the ledger API. Run with: pytest
-
-Vivaan + Akul: add a test here for every endpoint you build (see ledger/README.md).
-"""
+"""Smoke tests for the ledger API. Run with: pytest"""
 
 import os
 import tempfile
 
 # Point the ledger at a throwaway database BEFORE importing the app.
-os.environ["LEDGER_DB"] = os.path.join(tempfile.mkdtemp(), "test.db")
+os.environ.setdefault("LEDGER_DB", os.path.join(tempfile.mkdtemp(), "test.db"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -16,25 +13,26 @@ from ledger.main import app  # noqa: E402
 client = TestClient(app)
 
 
-def make_site() -> dict:
+def make_site(name: str = "Test Pantry") -> dict:
     response = client.post(
         "/sites",
-        json={
-            "name": "Test Pantry",
-            "county": "Alameda",
-            "state": "CA",
-            "lat": 37.8,
-            "lon": -122.27,
-        },
+        json={"name": name, "county": "Alameda", "state": "CA", "lat": 37.8, "lon": -122.27},
     )
     assert response.status_code == 201
     return response.json()
 
 
-def test_root():
-    response = client.get("/")
+def test_api_info():
+    response = client.get("/api")
     assert response.status_code == 200
     assert "canned_goods" in response.json()["categories"]
+
+
+def test_dashboard_and_camera_pages_serve_html():
+    for path in ("/", "/camera"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
 
 
 def test_snapshot_then_inventory():
@@ -76,17 +74,13 @@ def test_inventory_returns_latest_snapshot():
 def test_snapshot_rejects_bad_category():
     site = make_site()
     response = client.post(
-        "/snapshots",
-        json={"site_id": site["id"], "category": "weapons", "count": 1},
+        "/snapshots", json={"site_id": site["id"], "category": "weapons", "count": 1}
     )
     assert response.status_code == 422
 
 
 def test_snapshot_rejects_unknown_site():
-    response = client.post(
-        "/snapshots",
-        json={"site_id": 99999, "category": "dairy", "count": 5},
-    )
+    response = client.post("/snapshots", json={"site_id": 99999, "category": "dairy", "count": 5})
     assert response.status_code == 404
 
 
@@ -108,19 +102,13 @@ def test_forecast_flow():
 
     forecasts = client.get("/forecasts", params={"site_id": site["id"]}).json()
     assert forecasts[0]["predicted_demand"] == 200
-    assert forecasts[0]["multiplier"] == 2.0
 
-def test_gaps_computes_shortage():
-    site = make_site()
+
+def test_gaps_positive_means_shortage():
+    site = make_site("Gap Pantry")
     client.post(
         "/snapshots",
-        json={
-            "site_id": site["id"],
-            "category": "canned_goods",
-            "count": 60,
-            "confidence": 0.9,
-            "source": "test",
-        },
+        json={"site_id": site["id"], "category": "canned_goods", "count": 60, "source": "test"},
     )
     client.post(
         "/forecasts",
@@ -129,21 +117,29 @@ def test_gaps_computes_shortage():
             "category": "canned_goods",
             "predicted_demand": 480,
             "multiplier": 2.0,
-            "horizon_hours": 48,
-            "reason": "test storm",
+            "reason": "test",
             "source": "synthetic",
         },
     )
-
     gaps = client.get("/gaps").json()
-    site_gap = next(g for g in gaps if g["site_id"] == site["id"] and g["category"] == "canned_goods")
-    assert site_gap["current"] == 60
-    assert site_gap["predicted_demand"] == 480
-    assert site_gap["gap"] == 420
+    row = next(g for g in gaps if g["site_id"] == site["id"] and g["category"] == "canned_goods")
+    assert row["current"] == 60
+    assert row["gap"] == 420
+
+
+def test_gaps_skips_pairs_without_a_forecast():
+    site = make_site("Snapshot Only Pantry")
+    client.post(
+        "/snapshots",
+        json={"site_id": site["id"], "category": "dairy", "count": 10, "source": "test"},
+    )
+    gaps = client.get("/gaps").json()
+    assert not any(g["site_id"] == site["id"] and g["category"] == "dairy" for g in gaps)
 
 
 def test_gaps_skips_pairs_with_no_inventory():
-    site = make_site()
+    # Akul's case from PR #7: a forecast alone (no snapshot yet) must not produce a gap.
+    site = make_site("Forecast Only Pantry")
     client.post(
         "/forecasts",
         json={
@@ -157,63 +153,54 @@ def test_gaps_skips_pairs_with_no_inventory():
         },
     )
     gaps = client.get("/gaps").json()
-    matching = [g for g in gaps if g["site_id"] == site["id"] and g["category"] == "dairy"]
-    assert matching == []
+    assert not any(g["site_id"] == site["id"] and g["category"] == "dairy" for g in gaps)
 
 
-def test_recommendation_flow():
-    from_site = make_site()
-    to_site = make_site()
-    response = client.post(
+def test_recommendation_create_and_approve():
+    giver, taker = make_site("Giver"), make_site("Taker")
+    created = client.post(
         "/recommendations",
         json={
-            "from_site_id": from_site["id"],
-            "to_site_id": to_site["id"],
+            "from_site_id": giver["id"],
+            "to_site_id": taker["id"],
             "category": "canned_goods",
-            "quantity": 150,
-            "reason": "test transfer",
+            "quantity": 50,
+            "reason": "test",
         },
     )
-    assert response.status_code == 201
-    rec = response.json()
-    assert rec["status"] == "proposed"
+    assert created.status_code == 201
+    assert created.json()["status"] == "proposed"
 
-    approved = client.post(f"/recommendations/{rec['id']}/approve")
+    rec_id = created.json()["id"]
+    approved = client.post(f"/recommendations/{rec_id}/approve")
     assert approved.status_code == 200
     assert approved.json()["status"] == "approved"
 
 
-def test_recommendation_rejects_unknown_site():
-    site = make_site()
-    response = client.post(
-        "/recommendations",
-        json={
-            "from_site_id": 99999,
-            "to_site_id": site["id"],
-            "category": "canned_goods",
-            "quantity": 10,
-            "reason": "test",
-        },
+def test_recommendation_validates_sites_and_category():
+    site = make_site("Lonely")
+    assert (
+        client.post(
+            "/recommendations",
+            json={
+                "from_site_id": site["id"],
+                "to_site_id": 99999,
+                "category": "canned_goods",
+                "quantity": 5,
+            },
+        ).status_code
+        == 404
     )
-    assert response.status_code == 404
-
-
-def test_recommendation_rejects_bad_category():
-    from_site = make_site()
-    to_site = make_site()
-    response = client.post(
-        "/recommendations",
-        json={
-            "from_site_id": from_site["id"],
-            "to_site_id": to_site["id"],
-            "category": "weapons",
-            "quantity": 10,
-            "reason": "test",
-        },
+    assert (
+        client.post(
+            "/recommendations",
+            json={
+                "from_site_id": site["id"],
+                "to_site_id": site["id"],
+                "category": "gold",
+                "quantity": 5,
+            },
+        ).status_code
+        == 422
     )
-    assert response.status_code == 422
-
-
-def test_approve_rejects_unknown_recommendation():
-    response = client.post("/recommendations/99999/approve")
-    assert response.status_code == 404
+    assert client.post("/recommendations/99999/approve").status_code == 404

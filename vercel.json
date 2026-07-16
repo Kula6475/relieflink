@@ -1,0 +1,5 @@
+{
+  "buildCommand": "mkdir -p public/models && cp models/yolov8n.onnx public/models/",
+  "outputDirectory": "public",
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }]
+}

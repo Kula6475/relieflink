@@ -170,8 +170,15 @@ def category_multiplier(spike: float, coverage: float, category: str, fema_activ
 # ---------------------------------------------------------------- synthetic demo data
 
 
+# Real disasters are localized: the synthetic storm only hits this county, so other
+# sites keep surplus and the reallocation agent has somewhere to pull from.
+SYNTHETIC_STORM_COUNTIES = {"Santa Cruz"}
+
+
 def synthetic_alerts(site: dict, now: datetime) -> list[dict]:
-    """A fake severe storm (started 2h ago, ends in 36h) for sunny-day demos."""
+    """A fake severe storm (started 2h ago, ends in 36h) over SYNTHETIC_STORM_COUNTIES."""
+    if site["county"] not in SYNTHETIC_STORM_COUNTIES:
+        return []
     return [
         {
             "event": "Winter Storm Warning",

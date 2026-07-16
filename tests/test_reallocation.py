@@ -1,59 +1,42 @@
-"""Unit tests for the ledger-connected reallocation planner."""
+"""Tests for the reallocation solver and LangGraph nodes."""
 
-from reallocation_agent.agent import (
-    REALLOCATION_GRAPH,
-    build_plan,
-    claude_node,
-    route_costs,
-    solve_transfers,
-)
+from reallocation_agent.agent import REALLOCATION_GRAPH, claude_node, solve_transfers
 
 
-def test_route_costs_are_symmetric():
-    routes = [{"from_site_id": 1, "to_site_id": 2, "miles": 12.5}]
-    assert route_costs(routes) == {(1, 2): 12.5, (2, 1): 12.5}
-
-
-def test_solver_respects_truck_capacity():
+def test_nearest_surplus_covers_the_shortage():
+    surplus = {(1, "canned_goods"): 150, (4, "canned_goods"): 200}
+    shortage = {(3, "canned_goods"): 180}
     transfers = solve_transfers(
-        surplus={1: 200},
-        shortage={2: 180},
-        cost={(1, 2): 10.0},
-        source_capacity={1: 75},
+        surplus, shortage, {(1, 3): 75.0, (3, 4): 105.0}, {1: 1000, 4: 1000}
     )
-    assert transfers == [(1, 2, 75)]
+    moved = {(row["from_site_id"], row["to_site_id"]): row["quantity"] for row in transfers}
+    assert sum(moved.values()) == 180
+    assert moved[(1, 3)] == 150
+    assert moved[(4, 3)] == 30
 
 
-def test_build_plan_connects_gaps_routes_and_capacity():
-    gaps = [
-        {"site_id": 1, "category": "canned_goods", "gap": -150},
-        {"site_id": 2, "category": "canned_goods", "gap": 120},
-    ]
-    routes = [{"from_site_id": 1, "to_site_id": 2, "miles": 20.0}]
-    capacities = [{"site_id": 1, "trucks": 1, "max_load_units": 100}]
-
-    assert build_plan(gaps, routes, capacities) == [
-        {
-            "from_site_id": 1,
-            "to_site_id": 2,
-            "category": "canned_goods",
-            "quantity": 100,
-            "reason": "Move 100 units to reduce site 2's canned_goods shortfall of 120",
-        }
-    ]
+def test_capacity_limits_total_outbound_units():
+    surplus = {(1, "canned_goods"): 500, (1, "dry_goods"): 500}
+    shortage = {(2, "canned_goods"): 400, (2, "dry_goods"): 400}
+    transfers = solve_transfers(surplus, shortage, {(1, 2): 40.0}, {1: 300})
+    assert sum(row["quantity"] for row in transfers) == 300
 
 
-def test_build_plan_skips_missing_routes():
-    gaps = [
-        {"site_id": 1, "category": "dairy", "gap": -25},
-        {"site_id": 2, "category": "dairy", "gap": 25},
-    ]
-    assert build_plan(gaps, routes=[], capacities=[]) == []
+def test_categories_never_cross():
+    transfers = solve_transfers(
+        {(1, "dairy"): 100}, {(2, "canned_goods"): 100}, {(1, 2): 10.0}, {1: 1000}
+    )
+    assert transfers == []
+
+
+def test_no_gaps_no_transfers():
+    assert solve_transfers({}, {}, {}, {}) == []
 
 
 def test_reallocation_graph_has_expected_nodes():
-    nodes = REALLOCATION_GRAPH.get_graph().nodes
-    assert {"fetch", "solve", "post", "claude"}.issubset(nodes)
+    assert {"fetch", "solve", "post", "claude"}.issubset(
+        REALLOCATION_GRAPH.get_graph().nodes
+    )
 
 
 def test_dry_run_why_answer_never_needs_a_key(monkeypatch):

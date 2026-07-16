@@ -1,43 +1,45 @@
 # ReliefLink - context for AI assistants
 
-Hackathon project: camera-fed food bank inventory network with disaster-aware demand
-forecasting and reallocation. All Python. Four sections, each owned by a teammate.
+Camera-fed food bank inventory network with disaster-aware forecasting and reallocation.
+**One FastAPI server runs everything**: the JSON API, the React CRM dashboard, the edge
+camera page, and the YOLO model file.
 
 ## Layout and ownership
 
-| Folder | What | Owner |
+| Path | What | Owner |
 |---|---|---|
-| `ledger/` | FastAPI + SQLite source of truth (sites, snapshots, forecasts, routes) | Vivaan + Akul |
-| `dashboard/` | Streamlit ops view | Vivaan + Akul |
-| `vision_agent/` | Camera/photo -> Claude vision counts -> POST /snapshots | Nehal |
-| `disruption_agent/` | weather.gov + OpenFEMA -> demand forecasts -> POST /forecasts | Pranav |
-| `reallocation_agent/` | Phase 2: OR-Tools transfer optimizer + Claude explainer | everyone |
-| `shared/config.py` | CATEGORIES, LEDGER_URL, CLAUDE_MODEL constants | shared |
-| `docs/api-contract.md` | The interface between sections. Read before changing any endpoint. | shared |
+| `ledger/` | FastAPI + SQLite: API, queries, spreadsheet bridge, static serving | Vivaan + Akul |
+| `web/` | React CRM dashboard (CDN React + Babel, NO build step) + edge camera page | Vivaan + Akul (dashboard), Nehal (camera) |
+| `vision_agent/` | Python edge YOLO (`edge.py`), ONNX export helper, Claude/photo fallback | Nehal |
+| `disruption_agent/` | weather.gov + OpenFEMA -> demand forecasts | Pranav |
+| `reallocation_agent/` | OR-Tools transfer optimizer + optional Claude explainer | everyone |
+| `models/yolov8n.onnx` | Committed YOLO weights the browser camera page loads | Nehal |
+| `shared/config.py` | CATEGORIES, LEDGER_URL, CLAUDE_MODEL | shared |
+| `docs/api-contract.md` | The interface between all pieces. Read before changing endpoints. | shared |
 
-When helping a teammate, stay inside their folder unless they ask otherwise. Cross-section
-changes go through docs/api-contract.md first.
-
-## Commands (always from the repo root, venv active)
+## Commands (repo root, venv active)
 
 ```bash
-pip install -r requirements.txt        # one install for everything
-python -m ledger.seed                  # reset + fill relief.db
-uvicorn ledger.main:app --reload       # API at :8000, docs at /docs
-streamlit run dashboard/app.py         # dashboard
-python -m vision_agent.agent --site-id 1 --fake       # fake camera counts
-python -m disruption_agent.agent --synthetic           # fake storm forecasts
-python -m reallocation_agent.agent     # toy OR-Tools solve
-ruff check . && pytest -q              # what CI runs, keep green
+pip install -r requirements.txt
+python -m ledger.seed                     # reset + fill relief.db
+uvicorn ledger.main:app --reload          # EVERYTHING: dashboard at /, camera at /camera, API at /docs
+python -m vision_agent.agent --site-id 1 --fake     # fake counts (no key/camera)
+python -m disruption_agent.agent --synthetic         # fake storm + FEMA declaration
+python -m reallocation_agent.agent                   # solve gaps -> recommendations
+ruff check . && pytest -q                 # what CI runs, keep green
 ```
 
-## Conventions
+## Hard rules
 
-- Run modules with `python -m package.module` from the repo root (imports depend on it).
-- Categories are the fixed list in `shared/config.py`, never invent new ones inline.
-- Sections talk ONLY through the ledger HTTP API, never import each other's code or
-  touch relief.db directly.
-- Claude calls use the `anthropic` SDK with model from `shared.config.CLAUDE_MODEL`
-  (default `claude-opus-4-8`), key from `ANTHROPIC_API_KEY` in `.env` (gitignored).
-- Every agent has a no-key demo mode (`--fake` / `--synthetic`); keep those working.
+- **Dashboard style**: Salesforce-Lightning-inspired, and **no rounded corners** ever
+  (`* { border-radius: 0 !important }` in `web/styles.css` is intentional).
+- **No build step for the frontend**: React comes from CDN, JSX is compiled in-browser
+  by Babel standalone. Do not introduce npm/webpack/vite.
+- **Edge-first vision**: YOLO runs on-device (browser via onnxruntime-web, or
+  `ultralytics` in Python). Do not send camera frames to any cloud service; only counts
+  are posted. `ultralytics` stays OUT of requirements.txt (optional dep).
+- Categories are the fixed list in `shared/config.py`.
+- Components talk only through the ledger HTTP API; agents never touch relief.db.
+- Claude calls (photo fallback, plan explainer) use `shared.config.CLAUDE_MODEL`
+  (default `claude-opus-4-8`); every flow must keep working WITHOUT an API key.
 - No secrets in code or commits.
