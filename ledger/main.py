@@ -31,6 +31,8 @@ from ledger.models import (
 from ledger.queries import compute_gaps, latest_forecasts, latest_snapshots
 from ledger.spreadsheets import build_export, build_template, import_rows, rows_from_upload
 from shared.config import CATEGORIES
+from atlas_optimizer.service import AtlasOptimizationRequest, solve_allocation
+from atlas_optimizer.advisor import AtlasAdvisorRequest, explain
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = REPO_ROOT / "web"
@@ -164,6 +166,18 @@ def list_capacity(session: Session = Depends(get_session)) -> list[AgencyCapacit
 @app.get("/routes")
 def list_routes(session: Session = Depends(get_session)) -> list[Route]:
     return list(session.exec(select(Route)).all())
+
+
+@app.post("/optimizer/atlas")
+def optimize_atlas(request: AtlasOptimizationRequest) -> dict:
+    """Stateless OR-Tools solve for offers already validated by hosted ATLAS."""
+    return solve_allocation(request)
+
+
+@app.post("/atlas/advisor")
+def atlas_advisor(request: AtlasAdvisorRequest) -> dict:
+    """Claude explanation/follow-up node with a no-key deterministic fallback."""
+    return {"answer": explain(request)}
 
 
 # ---------------------------------------------------------------- recommendations
