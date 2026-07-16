@@ -11,3 +11,4 @@ captures/
 yolov8n.pt
 public/
 .vercel/
+.vercel
