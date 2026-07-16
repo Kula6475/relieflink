@@ -10,6 +10,10 @@ site, an optimizer proposes transfers, and an ops director approves them from a
 Salesforce-style CRM dashboard. Partners who live in spreadsheets can upload theirs and
 get back a live-linked workbook that is always in sync with the ledger.
 
+**Live demo: https://relieflink-iota.vercel.app** (dashboard at `/`, edge camera at
+`/camera`, API docs at `/docs`). Hosted demo data lives in a throwaway database and
+resets periodically; run locally for a persistent ledger.
+
 ## Quickstart
 
 ```bash
