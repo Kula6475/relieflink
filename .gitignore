@@ -9,3 +9,5 @@ __pycache__/
 .ruff_cache/
 captures/
 yolov8n.pt
+public/
+.vercel/
