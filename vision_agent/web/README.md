@@ -37,6 +37,10 @@ For cloud still-image analysis, configure Roboflow for package-level detection a
 OpenAI for label/category interpretation. A generic detector is not treated as a SKU
 classifier.
 
+The demo defaults to the public `supermarket-shelves-7eum5/2` package detector with
+`YOLO_COUNT_CLASSES=Product`. Replace it with a validated or fine-tuned food-bank model
+for production; the public model is only a package-level MVP baseline.
+
 ## Vercel
 
 Create or update a Vercel project with **Root Directory** set to `vision_agent/web`.
