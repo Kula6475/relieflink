@@ -85,6 +85,8 @@ export function VisionIntake() {
               ))}
             </div>
             <div className="vision-summary">
+              <div><span>Detection mode</span><strong>{result.mode === "cloud" ? "Roboflow cloud" : "Synthetic demo"}</strong></div>
+              <div><span>Detector model</span><strong>{result.yoloModel}</strong></div>
               <div><span>Visible detections</span><strong>{result.visibleObjectCount}</strong></div>
               <div><span>Average confidence</span><strong>{Math.round(result.averageConfidence * 100)}%</strong></div>
               <div><span>Product / category</span><strong>{result.classification.product} · {result.classification.category}</strong></div>
