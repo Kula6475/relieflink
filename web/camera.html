@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ReliefLink - Edge Camera</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <!-- onnxruntime-web runs YOLOv8n fully in this browser tab. Nothing leaves the device
+       except the category counts posted to the ledger. -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
+</head>
+<body>
+  <header class="global-header">
+    <div class="logo">Relief<span>Link</span> Edge Camera</div>
+    <div class="env"><span id="statusDot" class="status-dot"></span> <span id="statusText">idle</span></div>
+  </header>
+  <nav class="nav-tabs"><a href="/">&larr; Back to CRM</a></nav>
+
+  <main class="page">
+    <div class="card">
+      <div class="controls">
+        <label>Site:
+          <select id="siteSelect"></select>
+        </label>
+        <button id="startBtn" class="btn primary">Start camera</button>
+        <span class="meta" id="modelStatus">loading model...</span>
+      </div>
+    </div>
+
+    <div class="camera-layout">
+      <div class="camera-stage">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+      </div>
+
+      <div class="camera-side">
+        <div class="card">
+          <div class="card-header"><h2>Live shelf counts</h2><span class="meta">posted to the ledger when stable counts change</span></div>
+          <table>
+            <thead><tr><th>Category</th><th class="num">Count</th><th class="num">Last posted</th></tr></thead>
+            <tbody id="countRows"></tbody>
+          </table>
+        </div>
+        <div class="card">
+          <div class="card-header"><h2>Event log</h2></div>
+          <div class="log" id="log"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h2>Demo class mapping</h2><span class="meta">COCO stand-ins until we fine-tune on shelf data</span></div>
+          <table>
+            <tbody>
+              <tr><td>canned_goods</td><td>bottle, cup</td></tr>
+              <tr><td>produce</td><td>banana, apple, orange, broccoli, carrot</td></tr>
+              <tr><td>dairy</td><td>bowl, wine glass</td></tr>
+              <tr><td>dry_goods</td><td>book (looks like boxed pasta/cereal)</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/camera.js"></script>
+</body>
+</html>

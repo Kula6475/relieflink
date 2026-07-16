@@ -1,93 +1,193 @@
-"""ReliefLink reallocation agent (PHASE 2 - starts after the other sections land).
+"""ReliefLink reallocation agent: gaps -> minimum-cost transfer plan -> recommendations.
 
-Owners: everyone, built together.
+Pulls surplus/shortage per (site, category) from the ledger's /gaps endpoint, the
+distance matrix from /routes, and per-site truck capacity from /capacity, then solves
+one linear program across all categories:
 
-Takes real inventory (camera-fed) and predicted demand, computes the surplus/shortage
-gap per site per category, and solves a minimum-cost transportation problem with
-OR-Tools to recommend what to move where. A Claude call then explains the plan in
-plain language for the ops director.
+    minimize    total miles driven  -  (big reward per unit delivered)
+    subject to  a site never gives more than its spare units per category
+                a site never receives more than its shortfall per category
+                a site's TOTAL outbound units stay within trucks x max load
 
-The toy example below already solves a hardcoded transportation problem, so you can
-see the OR-Tools pattern working today:
+Each chosen transfer is POSTed to /recommendations (status "proposed"); the ops
+director approves them on the dashboard's Transfers tab. If ANTHROPIC_API_KEY is set,
+Claude writes a short plain-language justification of the overall plan.
 
-    python -m reallocation_agent.agent
+Run (after inventory + forecasts exist):
+    python -m reallocation_agent.agent            # solve and post recommendations
+    python -m reallocation_agent.agent --dry-run  # solve and print only
 """
 
+import argparse
+import os
+
+import requests
 from ortools.linear_solver import pywraplp
+
+from shared.config import CLAUDE_MODEL, LEDGER_URL
+
+DELIVERY_REWARD = 1000  # per-unit reward so filling shortages beats saving fuel
+UNKNOWN_ROUTE_MILES = 999.0
 
 
 def solve_transfers(
-    surplus: dict[int, int],
-    shortage: dict[int, int],
-    cost: dict[tuple[int, int], float],
-) -> list[tuple[int, int, int]]:
-    """Minimum-cost transportation solve for ONE category.
+    surplus: dict[tuple[int, str], int],
+    shortage: dict[tuple[int, str], int],
+    miles: dict[tuple[int, int], float],
+    capacity_units: dict[int, int],
+) -> list[dict]:
+    """One LP across all categories with per-site outbound capacity.
 
-    surplus:  {site_id: units available to give}
-    shortage: {site_id: units needed}
-    cost:     {(from_site, to_site): miles}
-
-    Returns [(from_site, to_site, quantity), ...]
+    surplus/shortage are keyed by (site_id, category); miles by (from, to) symmetric.
+    Returns [{"from_site_id", "to_site_id", "category", "quantity", "miles"}, ...]
     """
     solver = pywraplp.Solver.CreateSolver("GLOP")
 
-    # Decision variable: how many units to move along each (from, to) lane.
-    move = {
-        (src, dst): solver.NumVar(0, surplus[src], f"move_{src}_{dst}")
-        for src in surplus
-        for dst in shortage
-    }
+    lanes = [
+        (src, dst, category)
+        for (src, category) in surplus
+        for (dst, dst_category) in shortage
+        if dst_category == category and src != dst
+    ]
+    if not lanes:
+        return []
 
-    # Each surplus site can give at most what it has spare.
-    for src in surplus:
-        solver.Add(sum(move[src, dst] for dst in shortage) <= surplus[src])
+    move = {lane: solver.NumVar(0, solver.infinity(), f"move_{lane}") for lane in lanes}
 
-    # Each shortage site should receive at most what it needs
-    # (and as much as possible, rewarded via the objective below).
-    for dst in shortage:
-        solver.Add(sum(move[src, dst] for src in surplus) <= shortage[dst])
+    def lane_miles(src: int, dst: int) -> float:
+        return miles.get((src, dst), miles.get((dst, src), UNKNOWN_ROUTE_MILES))
 
-    # Minimize miles driven, minus a big reward per unit delivered so the solver
-    # prefers filling shortages over saving fuel.
+    for (src, category), spare in surplus.items():
+        solver.Add(
+            sum(move[lane] for lane in lanes if lane[0] == src and lane[2] == category) <= spare
+        )
+    for (dst, category), need in shortage.items():
+        solver.Add(
+            sum(move[lane] for lane in lanes if lane[1] == dst and lane[2] == category) <= need
+        )
+    for src in {lane[0] for lane in lanes}:
+        solver.Add(
+            sum(move[lane] for lane in lanes if lane[0] == src) <= capacity_units.get(src, 0)
+        )
+
     solver.Minimize(
-        sum(cost[src, dst] * move[src, dst] for src in surplus for dst in shortage)
-        - 1000 * sum(move[src, dst] for src in surplus for dst in shortage)
+        sum(
+            (lane_miles(src, dst) - DELIVERY_REWARD) * move[(src, dst, category)]
+            for (src, dst, category) in lanes
+        )
     )
 
     if solver.Solve() != pywraplp.Solver.OPTIMAL:
         return []
+
     return [
-        (src, dst, round(var.solution_value()))
-        for (src, dst), var in move.items()
+        {
+            "from_site_id": src,
+            "to_site_id": dst,
+            "category": category,
+            "quantity": round(var.solution_value()),
+            "miles": lane_miles(src, dst),
+        }
+        for (src, dst, category), var in move.items()
         if var.solution_value() > 0.5
     ]
 
 
-# ---------------------------------------------------------------- Phase 2 tasks
-#
-# TODO(team) - wire this to real data once Phase 1 lands:
-#   1. GET /gaps from the ledger (Vivaan/Akul build it in Phase 1) to get
-#      surplus/shortage per (site, category).
-#   2. GET /routes for the cost matrix and /capacity for per-site truck limits
-#      (add a capacity constraint to the solve).
-#   3. Run solve_transfers() once per category.
-#   4. POST each transfer to /recommendations with a reason string.
-#   5. explain_with_claude(): send the gaps + chosen plan to Claude
-#      (model from shared.config.CLAUDE_MODEL) and ask for a 3-sentence
-#      plain-language explanation an ops director would trust, plus answers
-#      to follow-up "why" questions.
+def explain_with_claude(transfers: list[dict], site_names: dict[int, str]) -> str | None:
+    """Plain-language justification for the ops director. Skipped without an API key."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        return None
+    import anthropic
+
+    plan = "\n".join(
+        f"- move {t['quantity']} {t['category']} from {site_names[t['from_site_id']]} "
+        f"to {site_names[t['to_site_id']]} ({t['miles']:.0f} mi)"
+        for t in transfers
+    )
+    client = anthropic.Anthropic()
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=300,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "You advise a food bank ops director. In 3 short sentences of plain "
+                    "language, justify this transfer plan (why these moves, why now):\n"
+                    f"{plan}"
+                ),
+            }
+        ],
+    )
+    return next((block.text for block in response.content if block.type == "text"), None)
 
 
-def demo() -> None:
-    """Toy run on hardcoded data: sites 1 and 4 have spare canned goods, 3 is short."""
-    surplus = {1: 150, 4: 200}
-    shortage = {3: 180}
-    cost = {(1, 3): 75.0, (4, 3): 105.0}
+def run(dry_run: bool = False) -> None:
+    gaps = requests.get(f"{LEDGER_URL}/gaps", timeout=10).json()
+    routes = requests.get(f"{LEDGER_URL}/routes", timeout=10).json()
+    capacity = requests.get(f"{LEDGER_URL}/capacity", timeout=10).json()
+    sites = requests.get(f"{LEDGER_URL}/sites", timeout=10).json()
+    site_names = {site["id"]: site["name"] for site in sites}
 
-    print("Toy transportation solve (canned_goods):")
-    for src, dst, quantity in solve_transfers(surplus, shortage, cost):
-        print(f"  move {quantity} units from site {src} to site {dst}")
+    if not gaps:
+        raise SystemExit(
+            "No gaps to solve: the ledger needs both inventory and forecasts first.\n"
+            "  python -m vision_agent.agent --site-id 1 --fake   (or use /camera)\n"
+            "  python -m disruption_agent.agent --synthetic"
+        )
+
+    surplus = {(g["site_id"], g["category"]): -g["gap"] for g in gaps if g["gap"] < 0}
+    shortage = {(g["site_id"], g["category"]): g["gap"] for g in gaps if g["gap"] > 0}
+    miles = {(r["from_site_id"], r["to_site_id"]): r["miles"] for r in routes}
+    capacity_units = {c["site_id"]: c["trucks"] * c["max_load_units"] for c in capacity}
+
+    transfers = solve_transfers(surplus, shortage, miles, capacity_units)
+    if not transfers:
+        print("Nothing to move: no site has spare units where another is short.")
+        return
+
+    shortfall = {key: value for key, value in shortage.items()}
+    for transfer in transfers:
+        need = shortfall.get((transfer["to_site_id"], transfer["category"]), 0)
+        reason = (
+            f"{site_names[transfer['to_site_id']]} is {need} short on "
+            f"{transfer['category']} under the current forecast; "
+            f"{site_names[transfer['from_site_id']]} has spare "
+            f"({transfer['miles']:.0f} mi run)"
+        )
+        print(
+            f"move {transfer['quantity']:>4} {transfer['category']:<13} "
+            f"{site_names[transfer['from_site_id']]} -> {site_names[transfer['to_site_id']]}"
+        )
+        if not dry_run:
+            requests.post(
+                f"{LEDGER_URL}/recommendations",
+                json={
+                    "from_site_id": transfer["from_site_id"],
+                    "to_site_id": transfer["to_site_id"],
+                    "category": transfer["category"],
+                    "quantity": transfer["quantity"],
+                    "reason": reason,
+                },
+                timeout=10,
+            ).raise_for_status()
+
+    if not dry_run:
+        print(f"\n{len(transfers)} recommendation(s) posted, approve them on the dashboard.")
+
+    explanation = explain_with_claude(transfers, site_names)
+    if explanation:
+        print(f"\nClaude's summary for the ops director:\n{explanation}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="ReliefLink reallocation agent")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="solve and print, do not post recommendations"
+    )
+    args = parser.parse_args()
+    run(dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
-    demo()
+    main()

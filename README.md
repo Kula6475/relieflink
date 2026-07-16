@@ -1,109 +1,112 @@
 # ReliefLink
 
 Camera-fed inventory network for food banks, with disaster-aware demand forecasting and
-smart reallocation between sites.
+smart reallocation between sites. **One server runs everything.**
 
-A webcam at each site counts shelf inventory with a Claude vision call and posts it to a
-shared ledger. A forecasting agent watches live weather and FEMA disaster feeds and predicts
-demand spikes per site. When a site is about to run short, an optimizer recommends what to
-move from which surplus site, and the ops dashboard shows it all live.
+Point any camera at a shelf: an on-edge YOLO model (running locally in the browser, no
+cloud calls) counts what it sees, and when someone takes a can off the shelf the shared
+ledger updates itself seconds later. Weather and FEMA feeds predict demand spikes per
+site, an optimizer proposes transfers, and an ops director approves them from a
+Salesforce-style CRM dashboard. Partners who live in spreadsheets can upload theirs and
+get back a live-linked workbook that is always in sync with the ledger.
 
-## Team and sections
-
-| Section | Owner | Folder | Status |
-|---|---|---|---|
-| Vision agent (camera to counts) | **Nehal** | [`vision_agent/`](vision_agent/) | Phase 1 |
-| Disruption agent (weather + FEMA to forecasts) | **Pranav** | [`disruption_agent/`](disruption_agent/) | Phase 1 |
-| Shared ledger (API + database) | **Vivaan + Akul** | [`ledger/`](ledger/) | Phase 1 |
-| Dashboard (live ops view) | **Vivaan + Akul** | [`dashboard/`](dashboard/) | Phase 1 |
-| Reallocation agent (optimizer + explainer) | **Everyone** | [`reallocation_agent/`](reallocation_agent/) | Phase 2, starts after Phase 1 lands |
-
-Each folder has its own `README.md` with your task checklist, how to run your part on its
-own, and a definition of done. **Start there.**
-
-## Architecture
-
-```
- vision_agent (Nehal)          disruption_agent (Pranav)
- camera/image -> Claude        api.weather.gov + OpenFEMA
- counts per category           demand forecast per site
-        |                              |
-        |  POST /snapshots             |  POST /forecasts
-        v                              v
- +--------------------------------------------------+
- |        ledger/  (Vivaan + Akul)                   |
- |  FastAPI + SQLite: sites, snapshots, forecasts,   |
- |  capacity, routes  ->  /gaps (surplus/shortage)   |
- +--------------------------------------------------+
-        |  GET /inventory /forecasts /gaps   ^
-        v                                    |  POST /recommendations
- dashboard/ (Vivaan + Akul)          reallocation_agent (Phase 2)
- Streamlit: map, levels,             OR-Tools transport solve +
- alerts, approve button              Claude plain-English explainer
-```
-
-The **API contract** between all four sections lives in
-[`docs/api-contract.md`](docs/api-contract.md). If you follow the contract, you can build
-your section completely independently. Change the contract only after telling the team.
-
-## Tech stack (chosen to be beginner friendly + AI friendly)
-
-- **Python everywhere.** One language, one virtualenv, one `requirements.txt`.
-- **SQLite** for the database. Zero setup, it is just a file (`relief.db`).
-- **FastAPI** for the ledger. Auto-generated interactive docs at `http://localhost:8000/docs`
-  where you can click "Try it out" on every endpoint.
-- **Streamlit** for the dashboard. Pure Python, hot reloads on save.
-- **Claude vision** (`claude-opus-4-8`) for counting, no model training needed.
-- **OR-Tools** for the Phase 2 transportation solve.
-- The repo ships `CLAUDE.md` / `AGENTS.md` so Claude Code, Cursor, etc. understand the
-  project instantly. Ask your AI assistant to read your section's README before you start.
-
-## Quickstart (everyone does this once)
+## Quickstart
 
 ```bash
 git clone https://github.com/PranavAchar01/relieflink.git
 cd relieflink
-
-# 1. Create a virtualenv and install everything (Python 3.11+)
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+python3 -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-
-# 2. Copy the env template (only Nehal needs a real ANTHROPIC_API_KEY)
-cp .env.example .env
-
-# 3. Seed the database with 4 demo sites + starting inventory
-python -m ledger.seed
-
-# 4. Start the ledger API (leave this running in one terminal)
-uvicorn ledger.main:app --reload
-
-# 5. In a second terminal: see it live
-streamlit run dashboard/app.py
+python -m ledger.seed                                # 4 demo sites + starting data
+uvicorn ledger.main:app --reload                     # the whole platform, one process
 ```
 
-Smoke-test the agents against the running ledger (no API key needed):
+Then open:
+
+| URL | What |
+|---|---|
+| http://localhost:8000/ | **CRM dashboard** (React, Salesforce-style, auto-refreshes) |
+| http://localhost:8000/camera | **Edge camera**: YOLOv8n in your browser, counts -> ledger |
+| http://localhost:8000/docs | Interactive API docs (try every endpoint) |
+
+Feed it data without any camera or API key:
 
 ```bash
-python -m vision_agent.agent --site-id 1 --fake      # posts fake camera counts
-python -m disruption_agent.agent --synthetic          # posts a fake storm forecast
+python -m vision_agent.agent --site-id 3 --fake       # fake shelf counts
+python -m disruption_agent.agent --synthetic           # fake storm forecasts
+python -m reallocation_agent.agent                     # propose transfers from the gaps
 ```
 
-Refresh the dashboard and you will see the numbers move.
+## The demo story (2 minutes)
 
-## How we work
+1. Open `/camera`, pick a site, hit Start. YOLO runs on-device; put bottles/apples/books
+   in view and watch counts appear. Remove one, the ledger updates automatically and the
+   dashboard's Inventory tab reflects it within 5 seconds.
+2. Run the disruption agent (`--synthetic` fakes a severe storm + a FEMA declaration for
+   Santa Cruz). The Forecasts tab lights up, Home shows shortages.
+3. Run the reallocation agent. The Transfers tab shows the minimum-cost plan; click
+   Approve.
+4. Spreadsheets tab: upload the template with a new pantry's counts, a new site appears
+   instantly; download the live workbook, always current, same link.
 
-1. **Branch per person**: `nehal/vision`, `pranav/disruption`, `vivaan/ledger`, `akul/dashboard`.
-2. Commit early and often, push your branch, open a PR to `main`.
-3. CI (lint + tests) must be green before merging. One teammate reviews.
-4. Run everything with `python -m <package>.<module>` **from the repo root** so imports work.
-5. Never commit `.env` or `relief.db` (gitignored already).
+## Architecture
 
-## Phases
+```
+ browser /camera page          disruption_agent (Python)
+ YOLOv8n via onnxruntime-web   api.weather.gov + OpenFEMA
+ (or vision_agent/edge.py      -> per-category demand forecasts
+  with ultralytics on any
+  Python device)                        |
+        | POST /snapshots               | POST /forecasts
+        v                               v
+ +---------------------------------------------------------------+
+ |  ledger/  -  ONE FastAPI server (SQLite file relief.db)       |
+ |  sites, snapshots, forecasts, capacity, routes                |
+ |  /gaps (surplus vs shortage)   /recommendations (+approve)    |
+ |  /spreadsheets/import + /export (live-linked workbook)        |
+ |  serves: / (CRM dashboard)  /camera  /models/yolov8n.onnx     |
+ +---------------------------------------------------------------+
+        ^ GET /gaps /routes /capacity        | polls every 5s
+        | POST /recommendations              v
+ reallocation_agent (OR-Tools LP     web/ React CRM dashboard
+ + optional Claude explainer)        (square corners, Lightning-style)
+```
 
-- **Phase 1 (now)**: each person makes their section real. The fake/demo modes already wired
-  in mean the dashboard has data on day one, then real camera counts and real weather
-  forecasts replace them as they land.
-- **Phase 2 (together)**: once `/inventory` and `/forecasts` are flowing, we build
-  `reallocation_agent/` as a team. The skeleton and a working OR-Tools toy example are
-  already in the folder.
+The API contract between all pieces lives in [`docs/api-contract.md`](docs/api-contract.md).
+
+## Tech stack
+
+- **Backend**: FastAPI + SQLite (SQLModel). One process, one file database.
+- **Dashboard**: React 18 via CDN with Babel standalone, so there is **no build step,
+  no Node required**. Styled after Salesforce Lightning: dense list views, stat cards,
+  global search, and zero rounded corners (`border-radius: 0` enforced globally).
+- **Edge vision**: YOLOv8n exported to ONNX (committed at `models/yolov8n.onnx`) running
+  in-browser via onnxruntime-web on any device with a camera. A Python flavor
+  (`vision_agent/edge.py`, `pip install ultralytics`) covers headless devices like a
+  Raspberry Pi. Detection is fully local; only category counts are sent.
+- **Forecasting**: live NWS alerts + OpenFEMA declarations, per-category multipliers,
+  time-aware coverage, regression baseline (see `disruption_agent/`).
+- **Optimization**: OR-Tools linear program with per-site truck capacity.
+- **Spreadsheets**: openpyxl. Upload any .xlsx/.csv (flexible headers); the export is
+  regenerated from the live ledger on every download.
+
+## Team
+
+| Area | Owner |
+|---|---|
+| Edge vision (`web/camera.*`, `vision_agent/`) | Nehal |
+| Disruption forecasts (`disruption_agent/`) | Pranav |
+| Ledger + dashboard (`ledger/`, `web/`) | Vivaan + Akul |
+| Reallocation (`reallocation_agent/`) | everyone |
+
+Workflow: branch per person, PR to `main`, CI (ruff + pytest) must be green.
+
+## Notes
+
+- Phone cameras need a secure context: `localhost` works out of the box; for a phone on
+  the LAN, tunnel with ngrok/localtunnel or run uvicorn with `--ssl-keyfile`.
+- The YOLO class mapping uses COCO stand-ins (bottle=can, book=boxed dry goods). The
+  upgrade path is fine-tuning YOLOv8n on real shelf photos and re-running
+  `python -m vision_agent.export_model`.
+- `python -m vision_agent.agent --image photo.jpg` still works as a Claude-vision
+  fallback for one-off photo counts (needs `ANTHROPIC_API_KEY`).

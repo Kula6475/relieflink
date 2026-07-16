@@ -1,14 +1,16 @@
-# One install for every section: pip install -r requirements.txt
+# One install for everything: pip install -r requirements.txt
 fastapi
 uvicorn[standard]
 sqlmodel
 requests
 python-dotenv
 anthropic
-streamlit
-pandas
-plotly
 ortools
+openpyxl
+python-multipart
 pytest
 httpx
 ruff
+
+# Optional, only for the Python edge detector (the browser one at /camera needs nothing):
+#   pip install ultralytics

@@ -1,15 +1,22 @@
-"""ReliefLink shared ledger API.
+"""ReliefLink unified server: shared ledger API + CRM dashboard + edge camera page.
 
-Owners: Vivaan + Akul. Your task checklist is in ledger/README.md.
+One process serves everything:
+    /            the React CRM dashboard (web/index.html)
+    /camera      the in-browser edge YOLO detector (web/camera.html)
+    /docs        interactive API docs (try every endpoint in the browser)
+    /models/...  the YOLOv8n ONNX weights the camera page loads
+    everything else: the JSON API (the contract in docs/api-contract.md)
 
 Run from the repo root:
     uvicorn ledger.main:app --reload
-
-Then open http://localhost:8000/docs for interactive docs where you can try
-every endpoint in the browser.
 """
 
-from fastapi import Depends, FastAPI, HTTPException
+from pathlib import Path
+
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 
 from ledger.database import get_session, init_db
@@ -21,24 +28,48 @@ from ledger.models import (
     Route,
     Site,
 )
+from ledger.queries import compute_gaps, latest_forecasts, latest_snapshots
+from ledger.spreadsheets import build_export, build_template, import_rows, rows_from_upload
 from shared.config import CATEGORIES
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+WEB_DIR = REPO_ROOT / "web"
+MODELS_DIR = REPO_ROOT / "models"
+
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 app = FastAPI(
-    title="ReliefLink Ledger",
-    description="Shared source of truth: sites, camera-fed inventory, demand forecasts.",
-    version="0.1.0",
+    title="ReliefLink",
+    description="Shared ledger + CRM dashboard + edge camera, one server.",
+    version="0.2.0",
 )
+
+# Edge cameras and dashboards may run on other devices on the LAN.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 init_db()
 
 
-@app.get("/")
-def root():
-    return {
-        "service": "ReliefLink Ledger",
-        "docs": "/docs",
-        "categories": CATEGORIES,
-    }
+# ---------------------------------------------------------------- frontend
+
+
+@app.get("/", include_in_schema=False)
+def dashboard():
+    return FileResponse(WEB_DIR / "index.html")
+
+
+@app.get("/camera", include_in_schema=False)
+def camera_page():
+    return FileResponse(WEB_DIR / "camera.html")
+
+
+app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+app.mount("/models", StaticFiles(directory=MODELS_DIR), name="models")
+
+
+@app.get("/api")
+def api_info():
+    return {"service": "ReliefLink Ledger", "docs": "/docs", "categories": CATEGORIES}
 
 
 # ---------------------------------------------------------------- sites
@@ -65,7 +96,7 @@ def create_site(site: Site, session: Session = Depends(get_session)) -> Site:
 def create_snapshot(
     snap: InventorySnapshot, session: Session = Depends(get_session)
 ) -> InventorySnapshot:
-    """Vision agent posts one count per (site, category) here."""
+    """Edge cameras (and spreadsheet imports) post counts here."""
     if snap.category not in CATEGORIES:
         raise HTTPException(422, f"category must be one of {CATEGORIES}")
     if session.get(Site, snap.site_id) is None:
@@ -78,17 +109,11 @@ def create_snapshot(
 
 
 @app.get("/inventory")
-def latest_inventory(
+def inventory(
     site_id: int | None = None, session: Session = Depends(get_session)
 ) -> list[InventorySnapshot]:
     """Current inventory: the newest snapshot for each (site, category)."""
-    query = select(InventorySnapshot).order_by(InventorySnapshot.created_at.desc())  # type: ignore[attr-defined]
-    if site_id is not None:
-        query = query.where(InventorySnapshot.site_id == site_id)
-    latest: dict[tuple[int, str], InventorySnapshot] = {}
-    for snap in session.exec(query):
-        latest.setdefault((snap.site_id, snap.category), snap)
-    return list(latest.values())
+    return latest_snapshots(session, site_id)
 
 
 # ---------------------------------------------------------------- forecasts
@@ -98,7 +123,6 @@ def latest_inventory(
 def create_forecast(
     forecast: DemandForecast, session: Session = Depends(get_session)
 ) -> DemandForecast:
-    """Disruption agent posts predicted demand per (site, category) here."""
     if forecast.category not in CATEGORIES:
         raise HTTPException(422, f"category must be one of {CATEGORIES}")
     if session.get(Site, forecast.site_id) is None:
@@ -111,17 +135,22 @@ def create_forecast(
 
 
 @app.get("/forecasts")
-def latest_forecasts(
+def forecasts(
     site_id: int | None = None, session: Session = Depends(get_session)
 ) -> list[DemandForecast]:
-    """The newest forecast for each (site, category)."""
-    query = select(DemandForecast).order_by(DemandForecast.created_at.desc())  # type: ignore[attr-defined]
-    if site_id is not None:
-        query = query.where(DemandForecast.site_id == site_id)
-    latest: dict[tuple[int, str], DemandForecast] = {}
-    for forecast in session.exec(query):
-        latest.setdefault((forecast.site_id, forecast.category), forecast)
-    return list(latest.values())
+    return latest_forecasts(session, site_id)
+
+
+# ---------------------------------------------------------------- gaps
+
+
+@app.get("/gaps")
+def gaps(session: Session = Depends(get_session)) -> list[dict]:
+    """gap = predicted_demand - current, per (site, category) with both numbers.
+
+    Positive = shortage, negative = surplus. The reallocation agent consumes this.
+    """
+    return compute_gaps(session)
 
 
 # ---------------------------------------------------------------- logistics
@@ -137,49 +166,23 @@ def list_routes(session: Session = Depends(get_session)) -> list[Route]:
     return list(session.exec(select(Route)).all())
 
 
+# ---------------------------------------------------------------- recommendations
+
+
 @app.get("/recommendations")
 def list_recommendations(session: Session = Depends(get_session)) -> list[Recommendation]:
     return list(session.exec(select(Recommendation)).all())
-
-
-@app.get("/gaps")
-def compute_gaps(session: Session = Depends(get_session)) -> list[dict]:
-    """For each (site, category) with both a snapshot and a forecast,
-    gap = predicted_demand - current count. Positive = shortage, negative = surplus.
-    """
-    inventory = latest_inventory(session=session)
-    forecasts = latest_forecasts(session=session)
-
-    current_by_key = {(s.site_id, s.category): s.count for s in inventory}
-    forecast_by_key = {(f.site_id, f.category): f.predicted_demand for f in forecasts}
-
-    gaps = []
-    for key, predicted_demand in forecast_by_key.items():
-        site_id, category = key
-        if key not in current_by_key:
-            continue
-        current = current_by_key[key]
-        gaps.append({
-            "site_id": site_id,
-            "category": category,
-            "current": current,
-            "predicted_demand": predicted_demand,
-            "gap": predicted_demand - current,
-        })
-    return gaps
 
 
 @app.post("/recommendations", status_code=201)
 def create_recommendation(
     rec: Recommendation, session: Session = Depends(get_session)
 ) -> Recommendation:
-    """Reallocation agent posts a proposed transfer here."""
     if rec.category not in CATEGORIES:
         raise HTTPException(422, f"category must be one of {CATEGORIES}")
-    if session.get(Site, rec.from_site_id) is None:
-        raise HTTPException(404, f"site {rec.from_site_id} not found")
-    if session.get(Site, rec.to_site_id) is None:
-        raise HTTPException(404, f"site {rec.to_site_id} not found")
+    for site_id in (rec.from_site_id, rec.to_site_id):
+        if session.get(Site, site_id) is None:
+            raise HTTPException(404, f"site {site_id} not found")
     rec.id = None
     rec.status = "proposed"
     session.add(rec)
@@ -189,10 +192,7 @@ def create_recommendation(
 
 
 @app.post("/recommendations/{rec_id}/approve")
-def approve_recommendation(
-    rec_id: int, session: Session = Depends(get_session)
-) -> Recommendation:
-    """Dashboard's approve button calls this. No body needed."""
+def approve_recommendation(rec_id: int, session: Session = Depends(get_session)) -> Recommendation:
     rec = session.get(Recommendation, rec_id)
     if rec is None:
         raise HTTPException(404, f"recommendation {rec_id} not found")
@@ -201,3 +201,46 @@ def approve_recommendation(
     session.commit()
     session.refresh(rec)
     return rec
+
+
+# ---------------------------------------------------------------- spreadsheets
+
+
+@app.post("/spreadsheets/import")
+async def import_spreadsheet(
+    file: UploadFile = File(...), session: Session = Depends(get_session)
+) -> dict:
+    """Upload a partner's .xlsx/.csv inventory sheet; rows land in the ledger.
+
+    The response links the live export, the "new spreadsheet" that stays connected:
+    every download regenerates from current ledger data.
+    """
+    data = await file.read()
+    try:
+        rows = rows_from_upload(file.filename or "upload.xlsx", data)
+    except Exception as error:  # unreadable file, wrong format
+        raise HTTPException(422, f"could not parse spreadsheet: {error}") from error
+    if not rows:
+        raise HTTPException(422, "no data rows found (need headers: site, category, count)")
+    summary = import_rows(rows, session)
+    summary["export_url"] = "/spreadsheets/export"
+    return summary
+
+
+@app.get("/spreadsheets/export")
+def export_spreadsheet(session: Session = Depends(get_session)) -> Response:
+    """The live-linked workbook: regenerated from the ledger on every download."""
+    return Response(
+        content=build_export(session),
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": 'attachment; filename="relieflink-live.xlsx"'},
+    )
+
+
+@app.get("/spreadsheets/template")
+def spreadsheet_template() -> Response:
+    return Response(
+        content=build_template(),
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": 'attachment; filename="relieflink-template.xlsx"'},
+    )
