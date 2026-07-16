@@ -12,3 +12,6 @@ ortools
 pytest
 httpx
 ruff
+inference-sdk
+langgraph
+langchain-anthropic

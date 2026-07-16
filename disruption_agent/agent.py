@@ -25,14 +25,19 @@ How each (site, category) forecast is computed:
 """
 
 import argparse
+import json
 import math
+import os
 import time
 from datetime import datetime, timedelta, timezone
+from typing import TypedDict
 
 import requests
+from langchain_anthropic import ChatAnthropic
+from langgraph.graph import END, START, StateGraph
 
 from disruption_agent.demand_model import baseline_demand
-from shared.config import CATEGORIES, LEDGER_URL
+from shared.config import CATEGORIES, CLAUDE_MODEL, LEDGER_URL
 
 WEATHER_API = "https://api.weather.gov/alerts/active"
 FEMA_API = "https://www.fema.gov/api/open/v2/DisasterDeclarationsSummaries"
@@ -50,6 +55,21 @@ FEMA_MULTIPLIER = 1.5
 FEMA_LOOKBACK_DAYS = 60
 MAX_MULTIPLIER = 4.0
 HORIZON_HOURS = 48
+
+
+class DisruptionState(TypedDict, total=False):
+    """Data passed between nodes in the disruption graph."""
+
+    synthetic: bool
+    verbose: bool
+    now: datetime
+    sites: list[dict]
+    declarations: list[dict]
+    alerts_by_site: dict[int, list[dict]]
+    scored_sites: list[dict]
+    reasons: dict[int, str]
+    forecasts: list[dict]
+    posted_count: int
 
 
 # ---------------------------------------------------------------- fetchers
@@ -196,45 +216,183 @@ def post_forecast(
     response.raise_for_status()
 
 
-def run(synthetic: bool = False, verbose: bool = False) -> None:
+def fetch_node(state: DisruptionState) -> dict:
+    """Fetch sites, weather alerts, and FEMA declarations."""
     now = datetime.now(timezone.utc)
-    sites = requests.get(f"{LEDGER_URL}/sites", timeout=10).json()
+    response = requests.get(f"{LEDGER_URL}/sites", timeout=10)
+    response.raise_for_status()
+    sites = response.json()
     if not sites:
         raise SystemExit("No sites in the ledger. Run: python -m ledger.seed")
 
+    synthetic = state.get("synthetic", False)
     declarations = synthetic_declarations(now) if synthetic else fetch_fema_declarations()
-    fema_counties = active_fema_counties(declarations, now)
-    source = "synthetic" if synthetic else "weather.gov"
-
-    for site in sites:
-        alerts = (
+    alerts_by_site = {
+        site["id"]: (
             synthetic_alerts(site, now)
             if synthetic
             else fetch_weather_alerts(site["lat"], site["lon"])
         )
-        if verbose:
-            for alert in alerts:
+        for site in sites
+    }
+
+    if state.get("verbose"):
+        for site in sites:
+            for alert in alerts_by_site[site["id"]]:
                 print(
                     f"  raw alert @ {site['name']}: event={alert.get('event')!r} "
                     f"severity={alert.get('severity')!r} onset={alert.get('onset')} "
                     f"ends={alert.get('ends') or alert.get('expires')}"
                 )
+    return {
+        "now": now,
+        "sites": sites,
+        "declarations": declarations,
+        "alerts_by_site": alerts_by_site,
+    }
 
+
+def score_node(state: DisruptionState) -> dict:
+    """Score time-weighted alert impact and FEMA coverage for each site."""
+    now = state["now"]
+    declarations = state["declarations"]
+    fema_counties = active_fema_counties(declarations, now)
+    scored_sites = []
+    for site in state["sites"]:
+        alerts = state["alerts_by_site"][site["id"]]
         spike, coverage, reason = worst_alert(alerts, now)
         fema_active = site["county"].lower() in fema_counties
         if fema_active:
             reason += f"; FEMA declaration active for {site['county']} County (x{FEMA_MULTIPLIER})"
+        scored_sites.append(
+            {
+                "site": site,
+                "alerts": alerts,
+                "spike": spike,
+                "coverage": coverage,
+                "fema_active": fema_active,
+                "fallback_reason": reason,
+            }
+        )
+    return {"scored_sites": scored_sites}
 
-        multipliers = {}
+
+def _message_text(message) -> str:
+    if isinstance(message.content, str):
+        return message.content
+    return "\n".join(
+        block.get("text", "")
+        for block in message.content
+        if isinstance(block, dict) and block.get("type") == "text"
+    ).strip()
+
+
+def claude_reason_node(state: DisruptionState) -> dict:
+    """Summarize active alert evidence into a short forecast reason per site."""
+    # Synthetic mode is guaranteed to remain a key-free demo path.
+    use_claude = bool(os.getenv("ANTHROPIC_API_KEY")) and not state.get("synthetic")
+    model = ChatAnthropic(model=CLAUDE_MODEL) if use_claude else None
+    reasons = {}
+    for scored in state["scored_sites"]:
+        site = scored["site"]
+        fallback = scored["fallback_reason"]
+        if model is None:
+            reasons[site["id"]] = fallback
+            continue
+        evidence = {
+            "site": {"name": site["name"], "county": site["county"]},
+            "alerts": [
+                {
+                    key: alert.get(key)
+                    for key in ("event", "severity", "headline", "onset", "ends", "expires")
+                }
+                for alert in scored["alerts"]
+            ],
+            "coverage": scored["coverage"],
+            "fema_active": scored["fema_active"],
+        }
+        prompt = (
+            "Summarize this disaster evidence as one concise reason for a 48-hour "
+            "food-bank demand forecast. State the alert and severity, timing/coverage, "
+            "and FEMA status when relevant. Do not invent facts or give instructions. "
+            "Return only the reason text.\n\n" + json.dumps(evidence, default=str)
+        )
+        reasons[site["id"]] = _message_text(model.invoke(prompt)) or fallback
+    return {"reasons": reasons}
+
+
+def forecast_node(state: DisruptionState) -> dict:
+    """Build one ledger forecast payload per site and inventory category."""
+    source = "synthetic" if state.get("synthetic") else "weather.gov"
+    forecasts = []
+    for scored in state["scored_sites"]:
+        site = scored["site"]
         for category in CATEGORIES:
-            multiplier = category_multiplier(spike, coverage, category, fema_active)
-            baseline = baseline_demand(site["id"], category, HORIZON_HOURS)
-            post_forecast(
-                site["id"], category, math.ceil(baseline * multiplier), multiplier, reason, source
+            multiplier = category_multiplier(
+                scored["spike"], scored["coverage"], category, scored["fema_active"]
             )
-            multipliers[category] = multiplier
+            baseline = baseline_demand(site["id"], category, HORIZON_HOURS)
+            forecasts.append(
+                {
+                    "site_id": site["id"],
+                    "category": category,
+                    "predicted_demand": math.ceil(baseline * multiplier),
+                    "multiplier": multiplier,
+                    "horizon_hours": HORIZON_HOURS,
+                    "reason": state["reasons"][site["id"]],
+                    "source": source,
+                }
+            )
+    return {"forecasts": forecasts}
 
-        print(f"{site['name']}: {multipliers} ({reason})")
+
+def post_node(state: DisruptionState) -> dict:
+    """Post all graph-produced forecasts through the ledger API."""
+    for forecast in state["forecasts"]:
+        post_forecast(
+            forecast["site_id"],
+            forecast["category"],
+            forecast["predicted_demand"],
+            forecast["multiplier"],
+            forecast["reason"],
+            forecast["source"],
+        )
+    return {"posted_count": len(state["forecasts"])}
+
+
+def build_graph():
+    graph = StateGraph(DisruptionState)
+    graph.add_node("fetch", fetch_node)
+    graph.add_node("score", score_node)
+    graph.add_node("claude_reason", claude_reason_node)
+    graph.add_node("forecast", forecast_node)
+    graph.add_node("post", post_node)
+    graph.add_edge(START, "fetch")
+    graph.add_edge("fetch", "score")
+    graph.add_edge("score", "claude_reason")
+    graph.add_edge("claude_reason", "forecast")
+    graph.add_edge("forecast", "post")
+    graph.add_edge("post", END)
+    return graph.compile()
+
+
+DISRUPTION_GRAPH = build_graph()
+
+
+def run(synthetic: bool = False, verbose: bool = False) -> None:
+    """Invoke the fetch -> score -> reason -> forecast -> post LangGraph."""
+    result = DISRUPTION_GRAPH.invoke({"synthetic": synthetic, "verbose": verbose})
+    by_site = {site["id"]: site for site in result["sites"]}
+    forecasts_by_site: dict[int, list[dict]] = {}
+    for forecast in result["forecasts"]:
+        forecasts_by_site.setdefault(forecast["site_id"], []).append(forecast)
+
+    for site_id, forecasts in forecasts_by_site.items():
+        multipliers = {row["category"]: row["multiplier"] for row in forecasts}
+        print(
+            f"{by_site[site_id]['name']}: {multipliers} "
+            f"({result['reasons'][site_id]})"
+        )
 
 
 def main() -> None:
