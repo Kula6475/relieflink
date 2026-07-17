@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { VisionResult } from "../lib/vision";
 
@@ -9,9 +9,65 @@ export function VisionIntake() {
   const [result, setResult] = useState<VisionResult | null>(null);
   const [count, setCount] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [cloud, setCloud] = useState(false);
+  const [cloud, setCloud] = useState(true);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reviewStatus, setReviewStatus] = useState<"draft" | "pending" | "approved">("draft");
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => () => stopCamera(), []);
+
+  useEffect(() => {
+    if (!cameraOpen || !videoRef.current || !streamRef.current) return;
+    videoRef.current.srcObject = streamRef.current;
+    void videoRef.current.play();
+  }, [cameraOpen]);
+
+  function stopCamera() {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setCameraOpen(false);
+  }
+
+  async function startCamera() {
+    setCameraError(null);
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError("Camera access is unavailable in this browser. Choose a still image instead.");
+      return;
+    }
+    try {
+      stopCamera();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      });
+      streamRef.current = stream;
+      setCameraOpen(true);
+    } catch (cameraException) {
+      setCameraError(cameraException instanceof Error && cameraException.name === "NotAllowedError"
+        ? "Camera permission was denied. Allow camera access in the browser, then try again."
+        : "The camera could not be opened. Choose a still image instead.");
+    }
+  }
+
+  function captureFrame() {
+    const video = videoRef.current;
+    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      setFile(new File([blob], `shelf-${new Date().toISOString().replaceAll(":", "-")}.jpg`, { type: "image/jpeg" }));
+      setResult(null);
+      setReviewStatus("draft");
+      stopCamera();
+    }, "image/jpeg", 0.88);
+  }
 
   async function analyze() {
     if (!file) return;
@@ -63,7 +119,15 @@ export function VisionIntake() {
             {busy ? "Running package detection…" : cloud ? "Run cloud analysis" : "Run synthetic review"}
           </button>
           <label className="cloud-toggle"><input type="checkbox" checked={cloud} onChange={(event) => setCloud(event.target.checked)} />Use configured Roboflow + vision LLM</label>
-          <p className="helper">Synthetic mode exercises the full review UI without Roboflow or an LLM key. Cloud mode is enabled by server configuration.</p>
+          <div className="camera-actions">
+            {!cameraOpen ? <button className="button secondary" onClick={() => void startCamera()}>Open phone camera</button> : null}
+            {cameraOpen ? <>
+              <button className="button primary" onClick={captureFrame}>Capture shelf photo</button>
+              <button className="button ghost" onClick={stopCamera}>Close camera</button>
+            </> : null}
+          </div>
+          <p className="helper">Cloud mode counts visible packages with the configured Roboflow detector. The camera captures one still image; it does not continuously track people or inventory.</p>
+          {cameraError ? <p className="error">{cameraError}</p> : null}
           {error ? <p className="error">{error}</p> : null}
         </div>
         {result ? (
@@ -103,7 +167,9 @@ export function VisionIntake() {
             <p className="helper">{reviewStatus === "pending" ? "Pending review: inventory is unchanged and the operator cannot self-approve in persistent mode." : "Approval creates an immutable intake transaction in the shared ledger."}</p>
           </div>
         ) : (
-          <div className="empty-vision"><span>Detection overlay</span><p>Bounding boxes, confidence, count, classification, and disagreements appear here.</p></div>
+          <div className="empty-vision">
+            {cameraOpen ? <video ref={videoRef} className="camera-preview" muted playsInline aria-label="Live shelf camera preview" /> : <><span>Detection overlay</span><p>Open the camera or choose a still image. Bounding boxes, confidence, count, classification, and disagreements appear here.</p></>}
+          </div>
         )}
       </div>
     </section>

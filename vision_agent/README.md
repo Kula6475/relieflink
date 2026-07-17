@@ -2,6 +2,21 @@
 
 **Owner: Nehal** | Status: **edge pipeline live**
 
+## Replacement agent
+
+`vision_agent/vision_agent.py` is the standalone replacement entrypoint for a
+camera owner. It is deliberately a still-image workflow: capture one frame, count
+visible packages, post category observations, and leave approval to a human reviewer.
+
+```bash
+python -m vision_agent.vision_agent --site-id 1 --fake
+python -m vision_agent.vision_agent --site-id 1 --image shelf.jpg
+python -m vision_agent.vision_agent --site-id 1 --camera 0
+```
+
+The fake path is key-free. The image and camera paths use the configured Claude
+vision model and the same ledger contract as the original agent.
+
 Shelf counting happens **on the edge**: a YOLOv8n model runs locally on whatever device
 is pointing at the shelf. No frames leave the device, only category counts are posted to
 the ledger, and only when a stable count actually changes (someone took a can off the
