@@ -103,7 +103,7 @@ export function VisionIntake() {
       <div className="section-heading">
         <div>
           <p className="eyebrow">Still-image intake</p>
-          <h2>Count first. Classify second. Human confirms.</h2>
+          <h2>Vision agent · count first, classify second, human confirms.</h2>
         </div>
         <span className="pill neutral">No continuous tracking</span>
       </div>
@@ -153,6 +153,7 @@ export function VisionIntake() {
               <div><span>Detector model</span><strong>{result.yoloModel}</strong></div>
               <div><span>Visible detections</span><strong>{result.visibleObjectCount}</strong></div>
               <div><span>Average confidence</span><strong>{Math.round(result.averageConfidence * 100)}%</strong></div>
+              <div><span>Count basis</span><strong>Visible packages</strong></div>
               <div><span>Product / category</span><strong>{result.classification.product} · {result.classification.category}</strong></div>
               <div><span>Classification source</span><strong>{result.classification.source.replaceAll("_", " ")}</strong></div>
             </div>
@@ -161,6 +162,7 @@ export function VisionIntake() {
               <input type="number" min="0" value={count} onChange={(event) => setCount(Number(event.target.value))} />
             </label>
             {result.classification.uncertainty ? <p className="warning">{result.classification.uncertainty}</p> : null}
+            <p className="helper">{result.countNote}</p>
             {reviewStatus === "draft" ? <button className="button secondary" onClick={() => intakeAction("submit")}>Submit observation for site review</button> : null}
             {reviewStatus === "pending" ? <button className="button primary" onClick={() => intakeAction("approve")}>Approve as Oakland site reviewer</button> : null}
             {reviewStatus === "approved" ? <p className="success">Approved · Oakland shared inventory increased by {count} units.</p> : null}

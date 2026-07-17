@@ -78,7 +78,7 @@ export function AtlasDashboard({ initialState = null }: AtlasDashboardProps) {
           {(["situation", "negotiation", "approvals", "vision"] as View[]).map((item) => (
             <button key={item} className={view === item ? "active" : ""} onClick={() => setView(item)}>
               <span>{item === "situation" ? "◎" : item === "negotiation" ? "⇄" : item === "approvals" ? "✓" : "▣"}</span>
-              {item === "vision" ? "Camera & intake" : item[0].toUpperCase() + item.slice(1)}
+              {item === "vision" ? "Vision agent" : item[0].toUpperCase() + item.slice(1)}
               {item === "approvals" ? <b>{state.proposal.approvals.length - approvedCount}</b> : null}
             </button>
           ))}

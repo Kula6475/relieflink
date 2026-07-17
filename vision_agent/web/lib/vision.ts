@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { config } from "dotenv";
 import { resolve } from "node:path";
+import sharp from "sharp";
 
 const localEnvironment = {
   ...(config({ path: resolve(process.cwd(), "../../.env"), override: false, quiet: true }).parsed ?? {}),
@@ -37,6 +38,8 @@ export type VisionResult = {
     uncertainty: string | null;
   };
   disagreement: string | null;
+  countMethod: "tiled_package_detection" | "synthetic_demo";
+  countNote: string;
   mode: "cloud" | "synthetic";
 };
 
@@ -61,28 +64,29 @@ function syntheticDetections(count = 100): Detection[] {
   });
 }
 
-async function runRoboflow(base64: string): Promise<{ predictions: Detection[]; width: number; height: number }> {
-  const apiKey = setting("ROBOFLOW_API_KEY");
-  const model = setting("YOLO_MODEL_ID");
-  if (!apiKey || !model) throw new Error("Roboflow is not configured");
-  const modelPath = model.split("/").map((part) => encodeURIComponent(part)).join("/");
+type RoboflowResponse = {
+  image?: { width?: number; height?: number };
+  predictions?: Array<{ x: number; y: number; width: number; height: number; confidence: number; class: string }>;
+};
+
+async function runRoboflowRequest(base64: string, apiKey: string, model: string) {
   const response = await fetch(
-    `https://serverless.roboflow.com/${modelPath}?api_key=${encodeURIComponent(apiKey)}&confidence=25&overlap=30`,
+    `https://serverless.roboflow.com/${model.split("/").map((part) => encodeURIComponent(part)).join("/")}?api_key=${encodeURIComponent(apiKey)}&confidence=${encodeURIComponent(setting("YOLO_CONFIDENCE") ?? "20")}&overlap=30`,
     { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: base64 },
   );
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 300);
     throw new Error(`Roboflow inference for ${model} failed (${response.status}): ${detail}`);
   }
-  const result = await response.json() as {
-    image?: { width?: number; height?: number };
-    predictions?: Array<{ x: number; y: number; width: number; height: number; confidence: number; class: string }>;
-  };
+  return await response.json() as RoboflowResponse;
+}
+
+function filterPredictions(result: RoboflowResponse): Detection[] {
   const countClasses = (setting("YOLO_COUNT_CLASSES") ?? "")
     .split(",")
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
-  const predictions = (result.predictions ?? []).map((item) => ({
+  return (result.predictions ?? []).map((item) => ({
     x: item.x,
     y: item.y,
     width: item.width,
@@ -90,10 +94,71 @@ async function runRoboflow(base64: string): Promise<{ predictions: Detection[]; 
     confidence: item.confidence,
     className: item.class,
   })).filter((item) => countClasses.length === 0 || countClasses.includes(item.className.toLowerCase()));
+}
+
+function intersectionOverUnion(first: Detection, second: Detection) {
+  const firstLeft = first.x - first.width / 2;
+  const firstTop = first.y - first.height / 2;
+  const secondLeft = second.x - second.width / 2;
+  const secondTop = second.y - second.height / 2;
+  const intersectionWidth = Math.max(0, Math.min(firstLeft + first.width, secondLeft + second.width) - Math.max(firstLeft, secondLeft));
+  const intersectionHeight = Math.max(0, Math.min(firstTop + first.height, secondTop + second.height) - Math.max(firstTop, secondTop));
+  const intersection = intersectionWidth * intersectionHeight;
+  const union = first.width * first.height + second.width * second.height - intersection;
+  return union ? intersection / union : 0;
+}
+
+function suppressDuplicateDetections(detections: Detection[]) {
+  const threshold = Number(setting("YOLO_NMS_IOU") ?? "0.45");
+  const kept: Detection[] = [];
+  for (const detection of [...detections].sort((a, b) => b.confidence - a.confidence)) {
+    if (!kept.some((existing) => existing.className === detection.className && intersectionOverUnion(existing, detection) >= threshold)) {
+      kept.push(detection);
+    }
+  }
+  return kept;
+}
+
+async function runRoboflow(bytes: Buffer): Promise<{ predictions: Detection[]; width: number; height: number }> {
+  const apiKey = setting("ROBOFLOW_API_KEY");
+  const model = setting("YOLO_MODEL_ID");
+  if (!apiKey || !model) throw new Error("Roboflow is not configured");
+  const metadata = await sharp(bytes).metadata();
+  const width = metadata.width ?? 900;
+  const height = metadata.height ?? 600;
+  const grid = Math.max(1, Math.min(3, Math.round(Number(setting("YOLO_TILE_GRID") ?? "3"))));
+  if (grid === 1) {
+    const result = await runRoboflowRequest(bytes.toString("base64"), apiKey, model);
+    return { width, height, predictions: filterPredictions(result) };
+  }
+
+  const overlap = Math.min(0.45, Math.max(0.1, Number(setting("YOLO_TILE_OVERLAP") ?? "0.25")));
+  const tileWidth = Math.min(width, Math.ceil((width * (1 + overlap)) / (grid + overlap)));
+  const tileHeight = Math.min(height, Math.ceil((height * (1 + overlap)) / (grid + overlap)));
+  const tiles = Array.from({ length: grid * grid }, (_, index) => {
+    const column = index % grid;
+    const row = Math.floor(index / grid);
+    const left = grid === 1 ? 0 : Math.round((width - tileWidth) * column / (grid - 1));
+    const top = grid === 1 ? 0 : Math.round((height - tileHeight) * row / (grid - 1));
+    return { left, top };
+  });
+  const tileResults = await Promise.all(tiles.map(async ({ left, top }) => {
+    const tileBytes = await sharp(bytes).extract({ left, top, width: tileWidth, height: tileHeight }).jpeg({ quality: 90 }).toBuffer();
+    const result = await runRoboflowRequest(tileBytes.toString("base64"), apiKey, model);
+    const resultWidth = result.image?.width ?? tileWidth;
+    const resultHeight = result.image?.height ?? tileHeight;
+    return filterPredictions(result).map((detection) => ({
+      ...detection,
+      x: left + detection.x * tileWidth / resultWidth,
+      y: top + detection.y * tileHeight / resultHeight,
+      width: detection.width * tileWidth / resultWidth,
+      height: detection.height * tileHeight / resultHeight,
+    }));
+  }));
   return {
-    width: result.image?.width ?? 900,
-    height: result.image?.height ?? 600,
-    predictions,
+    width,
+    height,
+    predictions: suppressDuplicateDetections(tileResults.flat()),
   };
 }
 
@@ -145,7 +210,7 @@ export async function analyzeStillImage(input: {
         `Cloud detection was selected, but ${missing.join(" and ")} is missing. Add it to the repository .env or vision_agent/web/.env.local, then restart Next.js.`,
       );
     }
-    const result = await runRoboflow(base64);
+    const result = await runRoboflow(input.bytes);
     detections = result.predictions;
     imageWidth = result.width;
     imageHeight = result.height;
@@ -191,6 +256,10 @@ export async function analyzeStillImage(input: {
       : 0,
     classification,
     disagreement,
+    countMethod: mode === "cloud" ? "tiled_package_detection" : "synthetic_demo",
+    countNote: mode === "cloud"
+      ? "Visible package count from overlapping camera tiles. Closed cartons and hidden items require a label, packing slip, or human confirmation."
+      : "Synthetic count for UI testing; replace with a real still-image analysis before recording inventory.",
     mode,
   };
 }
