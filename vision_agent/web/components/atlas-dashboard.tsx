@@ -8,12 +8,16 @@ import { VisionIntake } from "./vision-intake";
 
 type View = "situation" | "negotiation" | "approvals" | "vision";
 
+type AtlasDashboardProps = {
+  initialState?: AtlasDashboardState | null;
+};
+
 function statusLabel(value: string) {
   return value.replaceAll("_", " ");
 }
 
-export function AtlasDashboard() {
-  const [state, setState] = useState<AtlasDashboardState | null>(null);
+export function AtlasDashboard({ initialState = null }: AtlasDashboardProps) {
+  const [state, setState] = useState<AtlasDashboardState | null>(initialState);
   const [view, setView] = useState<View>("situation");
   const [busyApproval, setBusyApproval] = useState<string | null>(null);
   const [whyQuestion, setWhyQuestion] = useState("Why did ATLAS choose these sources?");
@@ -24,7 +28,9 @@ export function AtlasDashboard() {
     setState(await response.json());
   }
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    if (!initialState) void load();
+  }, [initialState]);
 
   const approvedCount = useMemo(
     () => state?.proposal.approvals.filter((approval) => approval.status === "approved").length ?? 0,
